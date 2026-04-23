@@ -1,0 +1,13 @@
+{
+  "model": "Classical SVM (Tuned)",
+  "best_params": {
+    "C": 500,
+    "gamma": "scale",
+    "kernel": "rbf"
+  },
+  "accuracy": 0.9139784946236559,
+  "precision": 0.9128734827264239,
+  "recall": 0.9087922403003754,
+  "f1_score": 0.9061720909612475,
+  "train_time_seconds": 5.6591246128082275
+}
