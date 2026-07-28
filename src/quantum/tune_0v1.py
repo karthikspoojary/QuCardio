@@ -13,8 +13,8 @@ from src.quantum.train_pegasos import PegasosSVMKernel, remap_labels_to_binary, 
 def kfn(sv1, sv2):
     return (np.abs(np.dot(sv1, sv2.conj().T)) ** 2).real
 
-sv_tr = np.load('data/sv_train.npz', allow_pickle=True)['sv_train']
-sv_te = np.load('data/sv_test.npz',  allow_pickle=True)['sv_test']
+sv_tr = np.load('data/sv_train_pegasos.npz', allow_pickle=True)['sv_train']
+sv_te = np.load('data/sv_test_pegasos.npz',  allow_pickle=True)['sv_test']
 d = np.load('data/features_9d.npz')
 y_train = d['y_train']
 y_test  = d['y_test']

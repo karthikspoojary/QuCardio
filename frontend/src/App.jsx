@@ -1,10 +1,11 @@
+/* eslint-disable no-unused-vars */
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Activity, Upload, Image as ImageIcon, AlertTriangle, CheckCircle,
   Zap, ChevronRight, Info, Eye, Cpu, FlaskConical, HeartPulse,
   BarChart3, ShieldAlert, X, Moon, Sun, Clock, Download,
-  History, BookOpen, Atom, TrendingUp, Phone
+  History, Atom, TrendingUp, Phone
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import jsPDF from 'jspdf';
@@ -479,7 +480,7 @@ function QuantumInsightsTab() {
         </p>
         <div className="flex flex-col gap-2 text-sm">
           {[
-            ['Feature Map',       'ZZFeatureMap — feature_dimension=9, reps=2, entanglement=linear'],
+            ['Feature Maps',      'QSVC: circular (reps=2) | Pegasos: linear (reps=2)'],
             ['Kernel Method',     'Statevector fidelity: |⟨ψᵢ|ψⱼ⟩|² via matrix multiplication'],
             ['Backend',           'Qiskit Statevector simulator (exact, no shot noise)'],
             ['Hilbert Space Dim', '2⁹ = 512 complex dimensions'],
@@ -561,17 +562,6 @@ export default function App() {
     document.documentElement.classList.toggle('dark', isDark);
   }, [isDark]);
 
-  // Keyboard shortcuts
-  useEffect(() => {
-    const onKey = (e) => {
-      if (e.target.tagName === 'INPUT') return;
-      if (e.code === 'Space' && file && !isLoading) { e.preventDefault(); handleAnalyze(); }
-      if (e.code === 'Escape') handleClear();
-      if (e.key === 'r' || e.key === 'R') handleClear();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  });
 
   // Image quality check using canvas
   const checkImageQuality = useCallback((f, dataUrl) => {
@@ -618,11 +608,10 @@ export default function App() {
   };
 
   const handleAnalyze = async () => {
-    if (!file) return;
+    if (!file || !file.size) return;
     setIsLoading(true); setError(null);
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('model', selectedModel);
     try {
       const res = await fetch(`http://localhost:8000/predict?model=${selectedModel}`, { method: 'POST', body: formData });
       if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Server error'); }
@@ -652,6 +641,19 @@ export default function App() {
     setFile({ name: item.filename });
     setActiveTab('diagnosis');
   };
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.target.tagName === 'INPUT') return;
+      if (e.code === 'Space' && file && !isLoading) { e.preventDefault(); handleAnalyze(); }
+      if (e.code === 'Escape') handleClear();
+      if (e.key === 'r' || e.key === 'R') handleClear();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file, isLoading]);
 
   const TABS = [
     { id: 'diagnosis',   label: 'Diagnosis',         Icon: HeartPulse },
@@ -813,9 +815,9 @@ export default function App() {
                       </div>
                     )}
 
-                    <button onClick={handleAnalyze} disabled={!file || isLoading}
+                    <button onClick={handleAnalyze} disabled={!file || !file.size || isLoading}
                       className={`w-full mt-3 py-2.5 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all
-                        ${!file || isLoading ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                        ${(!file || !file.size || isLoading) ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
                           : 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-md shadow-blue-200 hover:shadow-lg hover:-translate-y-0.5'}`}>
                       {isLoading
                         ? <><svg className="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">

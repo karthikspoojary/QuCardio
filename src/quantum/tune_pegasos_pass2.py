@@ -39,8 +39,8 @@ def tune_extended():
     y_train = data["y_train"]
     y_test  = data["y_test"]
 
-    sv_train = np.load(config.FEATURES_DIR / "sv_train.npz", allow_pickle=True)["sv_train"]
-    sv_test  = np.load(config.FEATURES_DIR / "sv_test.npz",  allow_pickle=True)["sv_test"]
+    sv_train = np.load(config.FEATURES_DIR / "sv_train_pegasos.npz", allow_pickle=True)["sv_train"]
+    sv_test  = np.load(config.FEATURES_DIR / "sv_test_pegasos.npz",  allow_pickle=True)["sv_test"]
 
     K_train_full = build_kernel_from_statevectors(sv_train, sv_train).astype(np.float64)
     K_test_full  = build_kernel_from_statevectors(sv_test,  sv_train).astype(np.float64)

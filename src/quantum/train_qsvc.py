@@ -66,7 +66,7 @@ def train_qsvc():
     
     # Paths for caching statevectors and kernel matrices
     config.FEATURES_DIR.mkdir(parents=True, exist_ok=True)
-    sv_train_path = config.FEATURES_DIR / 'sv_train.npz'
+    sv_train_path = config.FEATURES_DIR / 'sv_train_qsvc.npz'
     k_train_path  = config.FEATURES_DIR / 'K_train.npz'
     k_test_path   = config.FEATURES_DIR / 'K_test.npz'
 
@@ -142,6 +142,7 @@ def train_qsvc():
     config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     cm_path = config.RESULTS_DIR / 'confusion_matrix_qsvc.png'
     plt.savefig(cm_path, dpi=150)
+    plt.close()
     print(f"Confusion matrix saved to {cm_path}")
 
     # Save Model + results

@@ -3,8 +3,8 @@ import cv2
 from pathlib import Path
 from tqdm import tqdm
 import tensorflow as tf
-from keras.applications.resnet50 import ResNet50, preprocess_input
-from keras.models import Model
+from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
+from tensorflow.keras.models import Model
 import gc
 def load_dataset(data_dir, image_size=(340, 340)):
     """Load preprocessed ECG images"""

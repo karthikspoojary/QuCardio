@@ -73,8 +73,8 @@ def tune_pegasos():
     print(f"Data loaded — train: {X_train.shape}  test: {X_test.shape}")
 
     # ── 2. Load / compute statevectors ────────────────────────────────────────
-    sv_train_path = config.FEATURES_DIR / "sv_train.npz"
-    sv_test_path  = config.FEATURES_DIR / "sv_test.npz"
+    sv_train_path = config.FEATURES_DIR / "sv_train_pegasos.npz"
+    sv_test_path  = config.FEATURES_DIR / "sv_test_pegasos.npz"
 
     feature_map = ZZFeatureMap(
         feature_dimension=config.FEATURE_DIMENSION,
