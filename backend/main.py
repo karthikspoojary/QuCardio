@@ -62,8 +62,10 @@ qsvc_feat_variant = "minmax_0pi"  # feature transform for QSVC: minmax_01|l2_nor
 qsvc_reps        = 2              # ZZFeatureMap reps for QSVC
 qsvc_entangle    = "circular"     # entanglement for QSVC
 pegasos_models   = {}     # {(c1,c2): PegasosSVMKernel}
-feature_map      = None   # ZZFeatureMap used at inference (statevector method — Pegasos/QSVC)
-sv_train         = None   # Cached training statevectors (N_train × 512 complex)
+feature_map_qsvc = None   # ZZFeatureMap used for QSVC
+feature_map_pegasos = None # ZZFeatureMap used for Pegasos
+sv_train_qsvc    = None   # Cached training statevectors for QSVC
+sv_train_pegasos = None   # Cached training statevectors for Pegasos
 X_train_9d       = None   # 9-D scaled training features (needed for Pegasos kernel)
 
 CLASS_PAIRS = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
@@ -116,7 +118,7 @@ MODEL_LABELS = {
 async def load_models():
     global resnet_pool1, svd_reducer, minmax_scaler
     global svm_model, qsvc_model, pegasos_models
-    global feature_map, sv_train, X_train_9d
+    global feature_map_qsvc, feature_map_pegasos, sv_train_qsvc, sv_train_pegasos, X_train_9d
     global qsvc_feat_variant, qsvc_reps, qsvc_entangle
 
     print("\n" + "="*55)
@@ -176,22 +178,34 @@ async def load_models():
     print(f"      {len(pegasos_models)}/6 Pegasos models loaded")
 
     # ── 6. ZZFeatureMap + cached training statevectors ────────
-    # Build TWO feature maps: one for QSVC (tuned), one for Pegasos (linear, reps=2)
-    print("[6/6] Loading ZZFeatureMap + training statevectors...")
-    feature_map = ZZFeatureMap(          # Used for QSVC (tuned best config)
+    print("[6/6] Loading ZZFeatureMaps + training statevectors...")
+    feature_map_qsvc = ZZFeatureMap(          # Used for QSVC (tuned best config)
         feature_dimension=config.FEATURE_DIMENSION,
         reps=qsvc_reps,
         entanglement=qsvc_entangle
     )
-    print(f"      ZZFeatureMap: reps={qsvc_reps}  entanglement={qsvc_entangle}")
+    feature_map_pegasos = ZZFeatureMap(       # Used for Pegasos (linear, reps=2)
+        feature_dimension=config.FEATURE_DIMENSION,
+        reps=2,
+        entanglement='linear'
+    )
+    print(f"      ZZFeatureMap (QSVC): reps={qsvc_reps} entanglement={qsvc_entangle}")
+    print(f"      ZZFeatureMap (Peg): reps=2 entanglement=linear")
 
     # Load cached training statevectors for QSVC kernel computation
-    sv_train_path = config.FEATURES_DIR / 'sv_train.npz'
-    if sv_train_path.exists():
-        sv_train = np.load(sv_train_path, allow_pickle=True)['sv_train']
-        print(f"      sv_train loaded ✅  shape={sv_train.shape}")
+    sv_train_qsvc_path = config.FEATURES_DIR / 'sv_train_qsvc.npz'
+    if sv_train_qsvc_path.exists():
+        sv_train_qsvc = np.load(sv_train_qsvc_path, allow_pickle=True)['sv_train']
+        print(f"      sv_train_qsvc loaded ✅")
     else:
-        print(f"      ⚠️  sv_train.npz not found — QSVC inference will be slow (computes on-the-fly)")
+        print(f"      ⚠️  sv_train_qsvc.npz not found")
+        
+    sv_train_pegasos_path = config.FEATURES_DIR / 'sv_train_pegasos.npz'
+    if sv_train_pegasos_path.exists():
+        sv_train_pegasos = np.load(sv_train_pegasos_path, allow_pickle=True)['sv_train']
+        print(f"      sv_train_pegasos loaded ✅")
+    else:
+        print(f"      ⚠️  sv_train_pegasos.npz not found")
 
     # Load training 9D features (needed to slice kernel rows for Pegasos)
     features_9d_path = config.FEATURES_DIR / 'features_9d.npz'
@@ -210,20 +224,20 @@ async def load_models():
 # Quantum helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compute_single_statevector(x_9d):
+def compute_single_statevector(x_9d, fmap):
     """Compute ZZFeatureMap statevector for one 9-D sample. Returns (512,) complex."""
-    bound = feature_map.assign_parameters(x_9d)
+    bound = fmap.assign_parameters(x_9d)
     return Statevector(bound).data  # shape (512,)
 
 
-def quantum_kernel_row(x_9d_single, sv_train_matrix):
+def quantum_kernel_row(x_9d_single, sv_train_matrix, fmap):
     """
     K(x, x_train_i) = |<ψ(x)|ψ(x_i)>|²  for all training samples.
     x_9d_single     : (9,)      — one test sample (already MinMax-scaled)
     sv_train_matrix : (N, 512)  — cached training statevectors
     Returns         : (N,)      — kernel row
     """
-    sv_x = compute_single_statevector(x_9d_single)  # (512,)
+    sv_x = compute_single_statevector(x_9d_single, fmap)  # (512,)
     return (np.abs(sv_train_matrix.conj() @ sv_x) ** 2).real  # (N,)
 
 
@@ -272,7 +286,8 @@ def read_root():
             "svm":         svm_model     is not None,
             "qsvc":        qsvc_model    is not None,
             "pegasos":     len(pegasos_models) == 6,
-            "sv_train":    sv_train      is not None,
+            "sv_train_qsvc":    sv_train_qsvc      is not None,
+            "sv_train_pegasos": sv_train_pegasos   is not None,
             "X_train_9d":  X_train_9d    is not None,
         },
     }
@@ -287,7 +302,8 @@ def health_check():
         "svm_loaded":        svm_model      is not None,
         "qsvc_loaded":       qsvc_model     is not None,
         "pegasos_models":    len(pegasos_models),
-        "sv_train_loaded":   sv_train       is not None,
+        "sv_train_qsvc_loaded":   sv_train_qsvc       is not None,
+        "sv_train_pegasos_loaded":sv_train_pegasos    is not None,
         "X_train_9d_loaded": X_train_9d     is not None,
     }
 
@@ -369,13 +385,9 @@ async def predict_ecg(file: UploadFile = File(...), model: str = "classical"):
         img_for_resnet = cv2.imread(jpeg_path, cv2.IMREAD_GRAYSCALE).astype(np.float32)
         os.remove(jpeg_path)
 
-        # Also build a display preview using the current OTSU pipeline
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-            tmp_path = tmp.name
-        cv2.imwrite(tmp_path, img_bgr)
-        preprocessed_display = preprocess_ecg(tmp_path, output_size=(340, 340))
-        os.remove(tmp_path)
-        display_uint8 = (preprocessed_display * 255).astype(np.uint8)
+        # The UI should display the exact ResNet50 input. Since we do a JPEG round-trip,
+        # img_for_resnet is what actually goes into the model.
+        display_uint8 = img_for_resnet.astype(np.uint8)
         _, buf = cv2.imencode('.png', display_uint8)
         preprocessed_b64 = base64.b64encode(buf).decode('utf-8')
 
@@ -409,9 +421,9 @@ async def predict_ecg(file: UploadFile = File(...), model: str = "classical"):
             # ── QSVC: apply feature transform → compute kernel row → SVC.predict ──
             if qsvc_model is None:
                 raise HTTPException(status_code=503, detail="QSVC model not loaded.")
-            if sv_train is None:
+            if sv_train_qsvc is None:
                 raise HTTPException(status_code=503,
-                    detail="Training statevectors (sv_train.npz) not found.")
+                    detail="Training statevectors (sv_train_qsvc.npz) not found.")
 
             # Apply the same feature transform used during QSVC training
             # Best config: minmax_0pi → multiply MinMax-scaled [0,1] features by π
@@ -425,25 +437,25 @@ async def predict_ecg(file: UploadFile = File(...), model: str = "classical"):
                 x_qsvc = scaled[0]
 
             # K_test_row shape: (1, N_train) — compare one test sample vs all train
-            k_row     = quantum_kernel_row(x_qsvc, sv_train)       # (N_train,)
+            k_row     = quantum_kernel_row(x_qsvc, sv_train_qsvc, feature_map_qsvc)  # (N_train,)
             K_row_2d  = k_row.reshape(1, -1).astype(np.float32)    # (1, N_train)
             prediction_idx = int(qsvc_model.predict(K_row_2d)[0])
 
-            # Decision function → pseudo-probabilities via softmax
-            decision = qsvc_model.decision_function(K_row_2d)[0]  # (4,) one-vs-rest
-            exp_d    = np.exp(decision - decision.max())
-            probabilities = (exp_d / exp_d.sum()).tolist()         # softmax normalise
+            # QSVC decision function returns a (4,) OvR vector by default in sklearn
+            decision = qsvc_model.decision_function(K_row_2d)[0]  # (4,)
+            exp_d = np.exp(decision - decision.max())
+            probabilities = (exp_d / exp_d.sum()).tolist()         # softmax normalize
 
         elif model_key == 'pegasos':
             # ── Pegasos: kernel row → Algorithm 1 decision tree ──────────────
             if len(pegasos_models) < 6:
                 raise HTTPException(status_code=503,
                     detail="Pegasos models not fully loaded (need 6 binary models).")
-            if sv_train is None:
+            if sv_train_pegasos is None:
                 raise HTTPException(status_code=503,
-                    detail="Training statevectors (sv_train.npz) not found.")
+                    detail="Training statevectors (sv_train_pegasos.npz) not found.")
 
-            k_row          = quantum_kernel_row(scaled[0], sv_train)  # (N_train,)
+            k_row          = quantum_kernel_row(scaled[0], sv_train_pegasos, feature_map_pegasos)  # (N_train,)
             prediction_idx = int(pegasos_multiclass_predict(k_row))
 
             # Pegasos has no probability output — use decision scores per binary model

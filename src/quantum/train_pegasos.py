@@ -87,13 +87,14 @@ class PegasosSVMKernel:
         K_train  : (N, N) precomputed kernel matrix (float64)
         y_binary : (N,)   labels in {-1, +1}
         """
-        np.random.seed(self.seed)
+        # Use a local RNG so this fitter is reentrant and doesn't pollute global state.
+        rng = np.random.default_rng(self.seed)
         N = len(y_binary)
         lambda_param = 1.0 / (N * self.C)
         alpha = np.zeros(N, dtype=np.float64)
 
         for t in range(1, self.num_steps + 1):
-            i = np.random.randint(0, N)
+            i = int(rng.integers(0, N))
             # w·φ(x_i) = (1/λt) * Σ_j α_j * y_j * K(x_i, x_j)
             score = (1.0 / (lambda_param * t)) * np.dot(alpha * y_binary, K_train[i])
             if y_binary[i] * score < 1.0:   # hinge loss active
@@ -170,8 +171,8 @@ def train_pegasos():
 
     # ── 2. Load or Compute Statevectors ──────────────────────────────────────
     config.FEATURES_DIR.mkdir(parents=True, exist_ok=True)
-    sv_train_path = config.FEATURES_DIR / 'sv_train.npz'
-    sv_test_path  = config.FEATURES_DIR / 'sv_test.npz'
+    sv_train_path = config.FEATURES_DIR / 'sv_train_pegasos.npz'
+    sv_test_path  = config.FEATURES_DIR / 'sv_test_pegasos.npz'
 
     if sv_train_path.exists():
         print("Found existing train statevectors, loading …")

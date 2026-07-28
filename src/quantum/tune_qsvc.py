@@ -233,8 +233,8 @@ def tune_qsvc():
 
     best_sv_train = get_svs(X_tr_best, br, be, bf, "train", cache_dir)
     best_sv_test  = get_svs(X_te_best, br, be, bf, "test",  cache_dir)
-    np.savez_compressed(config.FEATURES_DIR / "sv_train.npz", sv_train=best_sv_train)
-    np.savez_compressed(config.FEATURES_DIR / "sv_test.npz",  sv_test=best_sv_test)
+    np.savez_compressed(config.FEATURES_DIR / "sv_train_qsvc.npz", sv_train=best_sv_train)
+    np.savez_compressed(config.FEATURES_DIR / "sv_test_qsvc.npz",  sv_test=best_sv_test)
     print(f"sv_train/test.npz updated for best config ({bf}, reps={br}, {be})")
 
     # Save meta so backend knows which feature transform to apply at inference
