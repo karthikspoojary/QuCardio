@@ -1,0 +1,7 @@
+{
+  "feature_variant": "minmax_0pi",
+  "reps": 2,
+  "entanglement": "circular",
+  "C": 5.0,
+  "accuracy": 0.9462365591397849
+}
