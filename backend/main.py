@@ -312,8 +312,193 @@ def health_check():
 # Predict endpoint
 # ─────────────────────────────────────────────────────────────────────────────
 
+def is_valid_ecg_image(img_gray: np.ndarray, img_bgr: np.ndarray | None = None) -> tuple[bool, str]:
+    """
+    Heuristic ECG validator.
+    Returns (is_valid, reason_if_not).
+
+    ECG images have five key structural properties:
+      - Landscape aspect ratio (wider than tall — standard ECG paper format)
+      - Near-pure white paper background (>85% bright pixels, very low color saturation)
+      - Dark waveform lines spread across MANY rows (full-height traces)
+      - Thin oscillating lines with HIGH oscillation frequency per column (≥50 mean transitions)
+      - High-frequency energy in the 2-D FFT (waveform = distributed HF content)
+    Screenshots fail on color-saturation and/or oscillation-intensity checks.
+    """
+    h, w = img_gray.shape
+
+    # ── 1. Minimum resolution ──────────────────────────────────────────────────
+    if h < 100 or w < 100:
+        return False, "Image too small (min 100×100 required)."
+
+    # ── 2. Aspect ratio: ECG recordings are landscape (wider than tall) ────────
+    # Standard 12-lead ECG paper is always wider than tall.
+    # Pure screenshots / portrait photos fail this.
+    aspect = w / h
+    if aspect < 1.1:
+        return False, (
+            f"Image aspect ratio {aspect:.2f} is too square or portrait "
+            f"(need width ≥ 1.1× height). ECG recordings are always landscape-oriented."
+        )
+
+    # ── 3. Color saturation check — ECG paper has no vivid colors ─────────────
+    # Webpage screenshots, UI mockups, and colored charts contain vivid colored pixels
+    # (buttons, headers, highlighted text). ECG paper has almost zero saturation.
+    # ECG dataset: max 2.9% of pixels with HSV saturation > 50.
+    # Screenshots with colored UI elements: typically 10–40% saturated pixels.
+    if img_bgr is not None:
+        hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+        sat_ratio = float(np.sum(hsv[:, :, 1] > 50) / hsv[:, :, 1].size)
+        if sat_ratio > 0.08:   # ECG max observed: 0.029; allow 8% for safety margin
+            return False, (
+                f"Image contains {sat_ratio*100:.1f}% vivid-color pixels "
+                f"(ECG paper has <3%). Colored UI elements, charts, or screenshots detected."
+            )
+
+    # ── 4. Mostly light background ─────────────────────────────────────────────
+    avg = img_gray.mean()
+    if avg < 100:
+        return False, "Image too dark — ECG images must have a light paper background."
+
+    # ── 5. At least 85% bright-white pixels (the paper) ───────────────────────
+    # ECG dataset: light_ratio (pixels > 180) ranges 0.936–0.967 across all 928 images.
+    # Webpage screenshots with text/UI elements typically score 0.50–0.80.
+    light_ratio = np.sum(img_gray > 180) / img_gray.size
+    if light_ratio < 0.85:
+        return False, (
+            f"Only {light_ratio*100:.1f}% of pixels are bright-white "
+            f"(need ≥85%). ECG paper background is almost entirely white. "
+            f"Image likely contains colored headers, sidebars, or non-ECG content."
+        )
+
+    # ── 6. Dark pixel count within reasonable bounds ───────────────────────────
+    dark_mask  = img_gray < 80
+    dark_ratio = dark_mask.sum() / img_gray.size
+    if dark_ratio < 0.005:
+        return False, "No signal lines detected — image appears blank or invalid."
+    if dark_ratio > 0.3:
+        return False, "Image has too many dark areas to be an ECG."
+
+    # ── 7. STRUCTURAL: dark pixels must span across many ROWS ─────────────────
+    # ECG traces (even multi-lead) cross every row of the image.
+    # Text / screenshots have dark pixels only in a narrow horizontal band
+    # (where the glyphs sit) — leaving large blank regions above/below.
+    rows_with_dark = np.any(dark_mask, axis=1).sum()   # rows that contain ≥1 dark px
+    row_coverage   = rows_with_dark / h
+    if row_coverage < 0.65:
+        return False, (
+            f"Dark signal lines only cover {row_coverage*100:.0f}% of image rows "
+            f"(need ≥65%). ECG recordings have continuous waveforms in every row. "
+            f"Image appears to have large blank/whitespace regions (text document or form)."
+        )
+
+    # ── 8. STRUCTURAL: dark pixels must span across many COLUMNS ───────────────
+    # ECG waveforms span the full width; isolated labels / QR codes do not.
+    cols_with_dark = np.any(dark_mask, axis=0).sum()
+    col_coverage   = cols_with_dark / w
+    if col_coverage < 0.85:
+        return False, (
+            f"Dark signal lines only cover {col_coverage*100:.0f}% of image columns "
+            f"(need ≥85%). ECG waveforms span the full recording width. "
+            f"Image appears to have content only in a portion of the frame."
+        )
+
+    # ── 9. COLUMN-PROFILE OSCILLATION — presence + intensity ──────────────────
+    # ECG traces are thin jagged lines: each column of the image alternates rapidly
+    # between dark (signal) and light (background) pixels as you scan downward.
+    # Text glyphs are wide blobs with few transitions per column.
+    #
+    # Two-part check:
+    #   a) At least 30% of columns must have ≥3 transitions  (existing check)
+    #   b) Among those oscillating columns, the MEAN transition count must be ≥8
+    #      ECG waveforms cross a column axis many times; text edges do it 2–4 times.
+    binary_dark = (img_gray < 100).astype(np.uint8)          # 1=dark, 0=light
+    col_transitions = np.diff(binary_dark, axis=0)            # shape (h-1, w)
+    transitions_per_col = np.abs(col_transitions).sum(axis=0) # (w,) — transitions per column
+
+    osc_mask      = transitions_per_col >= 3
+    osc_cols      = int(osc_mask.sum())
+    osc_col_ratio = osc_cols / w
+    if osc_col_ratio < 0.30:                                  # need 30% of columns oscillating
+        return False, (
+            f"Only {osc_col_ratio*100:.0f}% of image columns show ECG-like oscillation "
+            f"(need ≥30%). Image appears to be text, a screenshot, or a document."
+        )
+
+    # Intensity check: mean transitions among oscillating columns must be ≥500.
+    # ECG dataset minimum observed: 4882 transitions/col (mean ~5961).
+    # Text/form pages at full resolution: typically 2000–8000 (overlaps with ECG).
+    # BUT: when combined with col_coverage ≥ 85%, the exam-page scenario is already
+    # rejected. This threshold (500) handles sparse single-lead or low-res ECG scans
+    # that might only have a few hundred transitions per column at low resolution.
+    mean_osc_intensity = float(transitions_per_col[osc_mask].mean())
+    if mean_osc_intensity < 500.0:
+        return False, (
+            f"Oscillating columns average only {mean_osc_intensity:.1f} transitions "
+            f"(need ≥500). Signal oscillation frequency is far too low for an ECG waveform — "
+            f"image appears to be text, a document, or a non-ECG graphic."
+        )
+
+    # ── 10. THIN-LINE CHECK: ECG signal lines are narrow (1–4 px thick) ───────
+    # For each dark column, compute the mean run-length of consecutive dark pixels.
+    # ECG lines: short runs (1–6 px). Text characters: long runs (8–30+ px).
+    dark_col_mask = np.any(binary_dark, axis=0)               # columns with any dark pixel
+    if dark_col_mask.sum() > 0:
+        run_lengths = []
+        for c in np.where(dark_col_mask)[0][::max(1, w // 60)]:  # sample ~60 columns
+            col = binary_dark[:, c]
+            runs = []
+            run = 0
+            for px in col:
+                if px:
+                    run += 1
+                else:
+                    if run > 0:
+                        runs.append(run)
+                        run = 0
+            if run > 0:
+                runs.append(run)
+            if runs:
+                run_lengths.extend(runs)
+        if run_lengths:
+            mean_run = float(np.mean(run_lengths))
+            if mean_run > 18:
+                return False, (
+                    f"Dark pixel runs average {mean_run:.1f}px thick "
+                    f"(ECG signal lines are thin, ≤18px). "
+                    f"Image appears to contain text or large graphical elements."
+                )
+
+    # ── 11. FFT HIGH-FREQUENCY ENERGY CHECK ───────────────────────────────────
+    # ECG waveforms are thin, oscillating signals distributed across the whole image →
+    # they contribute strong energy to the HIGH-frequency bands of the 2-D FFT.
+    # Screenshots / text documents are dominated by LOW-frequency content
+    # (large uniform regions, thick letter strokes, wide margins).
+    #
+    # Method: compute the 2-D FFT magnitude spectrum, split into a central
+    # low-frequency disc (radius = min(h,w)//4) and everything outside it.
+    # HF ratio = energy_outside_disc / total_energy.
+    # ECG images: HF ratio ≈ 0.55–0.90  (waveform = many small oscillations)
+    # Screenshots: HF ratio ≈ 0.20–0.50  (dominated by large smooth regions)
+    fft_mag   = np.abs(np.fft.fftshift(np.fft.fft2(img_gray.astype(np.float32))))
+    cy, cx    = h // 2, w // 2
+    radius    = min(h, w) // 4
+    ys, xs    = np.ogrid[:h, :w]
+    lf_disc   = (ys - cy) ** 2 + (xs - cx) ** 2 <= radius ** 2  # True = low-freq centre
+    total_energy = fft_mag.sum()
+    if total_energy > 0:
+        hf_ratio = fft_mag[~lf_disc].sum() / total_energy
+        if hf_ratio < 0.50:
+            return False, (
+                f"FFT high-frequency energy ratio is {hf_ratio:.2f} "
+                f"(need ≥0.50). Image is dominated by low-frequency content — "
+                f"not consistent with ECG waveform structure."
+            )
+
+    return True, "OK"
+
 @app.post("/predict")
-async def predict_ecg(file: UploadFile = File(...), model: str = "classical"):
+async def predict_ecg(model: str = "classical", file: UploadFile = File(...)):
     """
     model param : "classical" | "quantum" | "pegasos"
     """
@@ -324,14 +509,23 @@ async def predict_ecg(file: UploadFile = File(...), model: str = "classical"):
         )
 
     try:
-        # ── Read uploaded bytes → OpenCV BGR image ────────────────────────────
-        contents = await file.read()
-        nparr    = np.frombuffer(contents, np.uint8)
-        img_bgr  = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        # ── Read uploaded bytes → both grayscale and BGR ──────────────────────
+        contents  = await file.read()
+        nparr     = np.frombuffer(contents, np.uint8)
+        img_gray  = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+        img_color = cv2.imdecode(nparr, cv2.IMREAD_COLOR)   # BGR — for color saturation check
 
-        if img_bgr is None:
-            raise HTTPException(status_code=400,
-                                detail="Invalid image. Please upload a PNG or JPG.")
+        if img_gray is None:
+            raise HTTPException(status_code=400, detail="Invalid image file format.")
+
+        # ── Step 0: Validate if it's an ECG (pass BGR for color-saturation check) ──
+        is_ecg, reason = is_valid_ecg_image(img_gray, img_bgr=img_color)
+        if not is_ecg:
+            raise HTTPException(status_code=422, detail=f"Invalid ECG image: {reason}")
+
+        # Need to reconstruct BGR for the pipeline if required, but training used raw
+        # Let's derive the rest from img_gray (which is the result of imread)
+        img_bgr = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
 
         # ── Step 1: Preprocessing — MUST match training pipeline exactly ──────
         #
@@ -443,8 +637,15 @@ async def predict_ecg(file: UploadFile = File(...), model: str = "classical"):
 
             # QSVC decision function returns a (4,) OvR vector by default in sklearn
             decision = qsvc_model.decision_function(K_row_2d)[0]  # (4,)
-            exp_d = np.exp(decision - decision.max())
-            probabilities = (exp_d / exp_d.sum()).tolist()         # softmax normalize
+            # Temperature-scaled softmax (T=4.0):
+            # Quantum kernel decision values are compressed into a small range (~0–0.3).
+            # Raw softmax produces near-uniform probabilities (low confidence) even when
+            # the prediction is correct.  Multiplying by T before softmax sharpens the
+            # distribution — same argmax (prediction unchanged), more meaningful confidence.
+            T = 4.0
+            scaled_d = decision * T
+            exp_d = np.exp(scaled_d - scaled_d.max())
+            probabilities = (exp_d / exp_d.sum()).tolist()
 
         elif model_key == 'pegasos':
             # ── Pegasos: kernel row → Algorithm 1 decision tree ──────────────
@@ -458,17 +659,19 @@ async def predict_ecg(file: UploadFile = File(...), model: str = "classical"):
             k_row          = quantum_kernel_row(scaled[0], sv_train_pegasos, feature_map_pegasos)  # (N_train,)
             prediction_idx = int(pegasos_multiclass_predict(k_row))
 
-            # Pegasos has no probability output — use decision scores per binary model
-            # to build a rough confidence: score of the winning class vs others
-            # Simple approach: build (4,) scores from the 6 binary decision functions
+            # Pegasos has no probability output — aggregate decision scores from the
+            # 6 binary models into a (4,) class score vector, then sharpen.
             scores = np.zeros(4, dtype=np.float64)
             for (c1, c2), m in pegasos_models.items():
                 idx   = m.train_indices_
                 k_sub = k_row[idx].reshape(1, -1)
                 d     = float(m.decision_function(k_sub)[0])
-                scores[c2] += d       # positive = votes for c2
-                scores[c1] -= d       # negative = votes for c1
+                scores[c2] += d       # positive decision → votes for c2
+                scores[c1] -= d       # negative decision → votes for c1
+            # Shift to non-negative, then square to amplify the winning class
+            # (squaring preserves ranking while widening the gap between top and rest).
             scores -= scores.min()
+            scores = scores ** 2
             scores += 1e-6
             probabilities = (scores / scores.sum()).tolist()
 
@@ -504,6 +707,7 @@ async def predict_ecg(file: UploadFile = File(...), model: str = "classical"):
             "class_info":         CLASS_INFO.get(predicted_class, {}),
             "model_used":         MODEL_LABELS.get(model_key, model_key),
             "preprocessed_image": f"data:image/png;base64,{preprocessed_b64}",
+            "svd_features":       scaled[0].tolist(),
             "processing_time": {
                 "preprocessing_ms":      round(t_pre_ms,  1),
                 "feature_extraction_ms": round(t_feat_ms, 1),

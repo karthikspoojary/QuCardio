@@ -541,6 +541,96 @@ function QuantumInsightsTab() {
   );
 }
 
+// ─── Pipeline Dataflow Visualization ─────────────────────────────────────────
+function PipelineFlow({ result, originalImage }) {
+  if (!result || !result.processing_time) return null;
+  const timing = result.processing_time;
+
+  return (
+    <div className="glass-card p-5 mt-4 overflow-x-auto">
+      <p className="text-xs font-semibold uppercase tracking-widest text-slate-400 mb-4 flex items-center gap-2">
+        <Activity className="w-3.5 h-3.5" /> Pipeline Dataflow
+      </p>
+      
+      <div className="flex items-center gap-4 min-w-max pb-2">
+        
+        {/* Step 1: Upload */}
+        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className="flex flex-col items-center w-32">
+          <div className="w-24 h-24 rounded-lg bg-slate-100 border border-slate-200 overflow-hidden mb-2 flex items-center justify-center p-1">
+            <img src={originalImage} alt="Raw Upload" className="max-w-full max-h-full object-contain mix-blend-multiply" />
+          </div>
+          <p className="text-xs font-bold text-slate-700">Raw Upload</p>
+          <p className="text-[10px] text-slate-400">Original ECG</p>
+        </motion.div>
+
+        <ChevronRight className="w-5 h-5 text-slate-300 flex-shrink-0" />
+
+        {/* Step 2: OTSU Preprocessing */}
+        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }} className="flex flex-col items-center w-32">
+          <div className="w-24 h-24 rounded-lg bg-slate-100 border border-blue-200 overflow-hidden mb-2 flex items-center justify-center p-1">
+            <img src={result.preprocessed_image} alt="Preprocessed" className="max-w-full max-h-full object-contain mix-blend-multiply" />
+          </div>
+          <p className="text-xs font-bold text-slate-700">Preprocessed</p>
+          <p className="text-[10px] text-blue-500">{timing.preprocessing_ms} ms</p>
+        </motion.div>
+
+        <ChevronRight className="w-5 h-5 text-slate-300 flex-shrink-0" />
+
+        {/* Step 3: ResNet50 */}
+        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }} className="flex flex-col items-center w-32">
+          <div className="w-24 h-24 rounded-lg bg-slate-900 border border-slate-700 overflow-hidden mb-2 flex items-center justify-center relative">
+            <div className="grid grid-cols-5 gap-0.5 w-16 h-16 opacity-60">
+              {[...Array(25)].map((_, i) => (
+                <div key={i} className={`bg-blue-400 rounded-sm ${i%3===0 ? 'opacity-80 animate-pulse' : 'opacity-20'}`} style={{ animationDelay: `${i*0.1}s` }} />
+              ))}
+            </div>
+            <div className="absolute inset-0 flex items-center justify-center">
+              <span className="bg-slate-900/80 px-1.5 py-0.5 rounded text-[8px] font-mono text-blue-300 border border-blue-500/30">462,400-D</span>
+            </div>
+          </div>
+          <p className="text-xs font-bold text-slate-700">ResNet50</p>
+          <p className="text-[10px] text-purple-500">{timing.feature_extraction_ms} ms</p>
+        </motion.div>
+
+        <ChevronRight className="w-5 h-5 text-slate-300 flex-shrink-0" />
+
+        {/* Step 4: SVD 9-D */}
+        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }} className="flex flex-col items-center w-32">
+          <div className="w-24 h-24 rounded-lg bg-slate-900 border border-slate-700 overflow-hidden mb-2 flex items-end justify-center p-2 gap-0.5">
+            {result.svd_features ? (
+              result.svd_features.map((val, i) => (
+                <motion.div key={i} initial={{ height: 0 }} animate={{ height: `${val * 100}%` }} transition={{ delay: 0.5 + i*0.05 }} className="w-full bg-cyan-400 rounded-t-sm" />
+              ))
+            ) : (
+              <div className="text-[10px] text-slate-500 flex items-center h-full">No SVD data</div>
+            )}
+          </div>
+          <p className="text-xs font-bold text-slate-700">SVD 9-D</p>
+          <p className="text-[10px] text-cyan-500">{timing.svd_reduction_ms} ms</p>
+        </motion.div>
+
+        <ChevronRight className="w-5 h-5 text-slate-300 flex-shrink-0" />
+
+        {/* Step 5: Quantum Kernel / SVM */}
+        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.5 }} className="flex flex-col items-center w-32">
+          <div className="w-24 h-24 rounded-lg bg-slate-900 border border-violet-500/50 overflow-hidden mb-2 flex items-center justify-center relative">
+            <div className="absolute w-16 h-16 border border-violet-500/30 rounded-full animate-[spin_4s_linear_infinite]" />
+            <div className="absolute w-16 h-16 border border-fuchsia-500/30 rounded-full animate-[spin_3s_linear_infinite_reverse]" style={{ transform: 'rotateX(60deg)' }} />
+            <div className="absolute w-16 h-16 border border-cyan-500/30 rounded-full animate-[spin_5s_linear_infinite]" style={{ transform: 'rotateY(60deg)' }} />
+            <Atom className="w-6 h-6 text-violet-400" />
+            <div className="absolute bottom-1 right-1">
+              <span className="bg-violet-900/80 px-1 py-0.5 rounded text-[7px] font-mono text-violet-300">512-D</span>
+            </div>
+          </div>
+          <p className="text-xs font-bold text-slate-700 truncate max-w-[120px]">{result.model_used}</p>
+          <p className="text-[10px] text-emerald-500">{timing.classification_ms} ms</p>
+        </motion.div>
+
+      </div>
+    </div>
+  );
+}
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [file, setFile]           = useState(null);
@@ -694,7 +784,7 @@ export default function App() {
       <div className="max-w-7xl mx-auto px-4 py-6 flex gap-5">
 
         {/* ── Left Sidebar ──────────────────────────────────── */}
-        <aside className="hidden lg:flex flex-col gap-4 w-64 flex-shrink-0">
+        <aside className="hidden lg:flex flex-col gap-4 w-64 shrink-0">
 
           {/* Model selector */}
           <div className="glass-card p-4 sidebar">
@@ -811,7 +901,17 @@ export default function App() {
 
                     {error && (
                       <div className="mt-2 flex items-start gap-2 p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700">
-                        <AlertTriangle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" /> {error}
+                        <AlertTriangle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                        <span>
+                          {error.startsWith('Invalid ECG image:')
+                            ? <>
+                                <strong>Not an ECG image.</strong>{' '}
+                                {error.replace('Invalid ECG image:', '').trim()}
+                                <br /><span className="text-rose-500 mt-0.5 block">Please upload a real ECG scan (JPG/PNG of an ECG printout).</span>
+                              </>
+                            : error
+                          }
+                        </span>
                       </div>
                     )}
 
@@ -875,6 +975,7 @@ export default function App() {
                     {result && !isLoading && (
                       <motion.div key="result" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
                         <ResultPanel result={result} resultRef={resultRef} />
+                        <PipelineFlow result={result} originalImage={preview} />
                         {result.processing_time && <TimingBreakdown timing={result.processing_time} />}
                       </motion.div>
                     )}

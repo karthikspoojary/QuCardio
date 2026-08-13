@@ -26,11 +26,14 @@ def main():
     print("Loading 9D features...")
     data = np.load(config.FEATURES_DIR / 'features_9d.npz')
     X_train = data['train_features']
+    X_test  = data['test_features']
     
     print("Computing Pegasos statevectors (linear)...")
     fm_pegasos = ZZFeatureMap(feature_dimension=9, reps=2, entanglement='linear')
     sv_train_pegasos = compute_svs(X_train, fm_pegasos, variant="minmax_01")
+    sv_test_pegasos  = compute_svs(X_test, fm_pegasos, variant="minmax_01")
     np.savez_compressed(config.FEATURES_DIR / 'sv_train_pegasos.npz', sv_train=sv_train_pegasos)
+    np.savez_compressed(config.FEATURES_DIR / 'sv_test_pegasos.npz', sv_test=sv_test_pegasos)
     
     print("Computing QSVC statevectors...")
     meta_path = config.MODELS_DIR / 'qsvc_meta.json'
@@ -44,7 +47,9 @@ def main():
         
     fm_qsvc = ZZFeatureMap(feature_dimension=9, reps=qsvc_reps, entanglement=qsvc_entangle)
     sv_train_qsvc = compute_svs(X_train, fm_qsvc, variant=qsvc_variant)
+    sv_test_qsvc  = compute_svs(X_test, fm_qsvc, variant=qsvc_variant)
     np.savez_compressed(config.FEATURES_DIR / 'sv_train_qsvc.npz', sv_train=sv_train_qsvc)
+    np.savez_compressed(config.FEATURES_DIR / 'sv_test_qsvc.npz', sv_test=sv_test_qsvc)
     print("Done generating separate statevectors.")
 
 if __name__ == "__main__":

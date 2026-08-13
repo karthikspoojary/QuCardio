@@ -97,8 +97,8 @@ def predict_qsvc(X_train, X_test, y_train):
     X_te_t = transform(X_test)
 
     # Load or recompute statevectors
-    sv_tr_path = config.FEATURES_DIR / "sv_train.npz"
-    sv_te_path = config.FEATURES_DIR / "sv_test.npz"
+    sv_tr_path = config.FEATURES_DIR / "sv_train_qsvc.npz"
+    sv_te_path = config.FEATURES_DIR / "sv_test_qsvc.npz"
 
     if sv_tr_path.exists() and sv_te_path.exists():
         sv_tr = np.load(sv_tr_path, allow_pickle=True)["sv_train"]
@@ -130,8 +130,8 @@ def predict_pegasos(X_test, y_test):
 
     from src.quantum.train_pegasos import PegasosSVMKernel, CLASS_PAIRS
 
-    sv_tr_path = config.FEATURES_DIR / "sv_train.npz"
-    sv_te_path = config.FEATURES_DIR / "sv_test.npz"
+    sv_tr_path = config.FEATURES_DIR / "sv_train_pegasos.npz"
+    sv_te_path = config.FEATURES_DIR / "sv_test_pegasos.npz"
 
     if not sv_tr_path.exists() or not sv_te_path.exists():
         print("         ERROR: sv_train.npz / sv_test.npz not found.")
