@@ -36,6 +36,9 @@ data/processed_340/
 data/processed_64/
 data/resnet50_features.npz
 data/test_samples/
+data/ECG_DATA/
+data/new ecg data/
+data/test_data/
 
 # ============================
 # Trained Model Artifacts
