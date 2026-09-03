@@ -320,10 +320,10 @@ def is_valid_ecg_image(img_gray: np.ndarray, img_bgr: np.ndarray | None = None) 
     ECG images have five key structural properties:
       - Landscape aspect ratio (wider than tall — standard ECG paper format)
       - Near-pure white paper background (>85% bright pixels, very low color saturation)
-      - Dark waveform lines spread across MANY rows (full-height traces)
-      - Thin oscillating lines with HIGH oscillation frequency per column (≥50 mean transitions)
+      - Dark waveform lines spanning ≥65% of rows and ≥85% of columns (full-area traces)
+      - Thin oscillating lines with HIGH oscillation frequency per column (≥500 mean transitions)
       - High-frequency energy in the 2-D FFT (waveform = distributed HF content)
-    Screenshots fail on color-saturation and/or oscillation-intensity checks.
+    Screenshots fail on color-saturation, coverage, and/or oscillation-intensity checks.
     """
     h, w = img_gray.shape
 
@@ -409,9 +409,12 @@ def is_valid_ecg_image(img_gray: np.ndarray, img_bgr: np.ndarray | None = None) 
     # Text glyphs are wide blobs with few transitions per column.
     #
     # Two-part check:
-    #   a) At least 30% of columns must have ≥3 transitions  (existing check)
-    #   b) Among those oscillating columns, the MEAN transition count must be ≥8
-    #      ECG waveforms cross a column axis many times; text edges do it 2–4 times.
+    #   a) At least 30% of columns must have ≥3 transitions  (presence check)
+    #   b) Among those oscillating columns, the MEAN transition count must be ≥500.
+    #      ECG dataset minimum observed: 4882 transitions/col (mean ~5961).
+    #      Text / form pages at full resolution can reach 2000–8000 but are already
+    #      rejected by the col_coverage ≥ 85% check above; the 500 floor handles
+    #      genuine low-resolution or single-lead ECG scans.
     binary_dark = (img_gray < 100).astype(np.uint8)          # 1=dark, 0=light
     col_transitions = np.diff(binary_dark, axis=0)            # shape (h-1, w)
     transitions_per_col = np.abs(col_transitions).sum(axis=0) # (w,) — transitions per column

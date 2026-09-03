@@ -134,8 +134,8 @@ def predict_pegasos(X_test, y_test):
     sv_te_path = config.FEATURES_DIR / "sv_test_pegasos.npz"
 
     if not sv_tr_path.exists() or not sv_te_path.exists():
-        print("         ERROR: sv_train.npz / sv_test.npz not found.")
-        print("         Run src/quantum/train_qsvc.py or scripts/save_best_qsvc.py first.")
+        print("         ERROR: sv_train_pegasos.npz / sv_test_pegasos.npz not found.")
+        print("         Run scripts/fix_statevectors.py to generate Pegasos statevectors.")
         return None, 0
 
     sv_tr = np.load(sv_tr_path, allow_pickle=True)["sv_train"]

@@ -78,7 +78,9 @@ def main():
                 missing.append(raw_path)
                 continue
 
-        shutil.copy2(raw_path, OUTPUT_DIR / cls_name / raw_fname)
+        # Use raw_path.name (not raw_fname) to preserve the actual file extension,
+        # which may differ from the processed filename when found via alternate ext.
+        shutil.copy2(raw_path, OUTPUT_DIR / cls_name / raw_path.name)
         counts[cls_name] += 1
 
     print(f"\nDone! Raw images copied to: {OUTPUT_DIR}/")
