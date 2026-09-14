@@ -16,6 +16,7 @@ def load_data(ecg_dir="data/ECG_DATA", non_ecg_dir="data/NON_ECG_DATA"):
     
     # We might have too many ECG images (~8000), to balance it a bit we can sample
     # Let's use up to 2000 ECG images and all non-ECG
+    np.random.seed(42)  # Seed for deterministic subset selection
     np.random.shuffle(ecg_paths)
     ecg_paths = ecg_paths[:2000]
     
@@ -71,9 +72,10 @@ def main():
     
     model.fit(train_ds, validation_data=val_ds, epochs=10, callbacks=callbacks)
     
-    # Save the final model in .keras format
-    model.save("models/ecg_detector.keras")
-    print("Saved ECG detector to models/ecg_detector.keras")
+    # ModelCheckpoint already saved the best model to models/ecg_detector.keras
+    # EarlyStopping restored the best weights into memory.
+    # We do NOT want to blindly save the final epoch over the best checkpoint.
+    print("Training complete. Best ECG detector saved to models/ecg_detector.keras")
 
 if __name__ == "__main__":
     main()

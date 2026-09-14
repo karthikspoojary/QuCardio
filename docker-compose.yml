@@ -28,8 +28,11 @@ services:
     volumes:
       # Mount trained models from host so we don't bake 1GB+ into the image
       - ./backend/models:/app/backend/models:ro
+      - ./models:/app/models:ro
+      # Mount data folder for statevector caches required by QSVC/Pegasos
+      - ./data:/app/data:ro
       # Persist SQLite audit log on host
-      - ./audit.db:/app/audit.db
+      - ./backend/audit.db:/app/backend/audit.db
       # Persist PDF reports
       - /tmp/qucardio_reports:/tmp/qucardio_reports
     depends_on:

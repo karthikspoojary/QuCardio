@@ -39,8 +39,8 @@ const MODEL_PERF = [
 const PIPELINE_STEPS = [
   ['OTSU Adaptive Preprocessing', '340×340 grayscale, grid removal'],
   ['ResNet50 Feature Extraction',  'pool1_pool → 462,400-D vector'],
-  ['Truncated SVD Reduction',      '462K → 9 principal components'],
-  ['MinMax Normalization',          '[0, 1] scaling'],
+  ['Truncated SVD Reduction',      '462K → 9 latent dimensions (SVD)'],
+  ['MinMax Normalization',          '[0, π] scaling'],
   ['RBF SVM Classification',        'C=10, balanced class weights'],
 ];
 
@@ -237,8 +237,8 @@ function ResultPanel({ result, file, selectedModel, resultRef }) {
         setIsPdfLoading(true);
         const formData = new FormData();
         formData.append('file', file);
-        formData.append('model_name', selectedModel || 'classical');
-        const res = await fetch(`http://localhost:8000/predict/pdf`, {
+        // model passed as query param (backend declares it as query, not form field)
+        const res = await fetch(`/predict/pdf?model=${encodeURIComponent(selectedModel || 'classical')}`, {
           method: 'POST',
           body: formData,
         });
@@ -731,7 +731,7 @@ export default function App() {
     const formData = new FormData();
     formData.append('file', file);
     try {
-      const res = await fetch(`http://localhost:8000/predict?model=${selectedModel}`, { method: 'POST', body: formData });
+      const res = await fetch(`/predict?model=${encodeURIComponent(selectedModel)}`, { method: 'POST', body: formData });
       if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Server error'); }
       const data = await res.json();
       setResult(data);
@@ -975,7 +975,7 @@ export default function App() {
                         <div className="mt-4 flex gap-3 text-xs text-slate-400">
                           <span className="flex items-center gap-1"><CheckCircle className="w-3 h-3 text-emerald-400" />Drag & drop</span>
                           <span className="flex items-center gap-1"><CheckCircle className="w-3 h-3 text-emerald-400" />Any ECG format</span>
-                          <span className="flex items-center gap-1"><CheckCircle className="w-3 h-3 text-emerald-400" />~400ms inference</span>
+                          <span className="flex items-center gap-1"><CheckCircle className="w-3 h-3 text-emerald-400" />~15s (QSVC) / 400ms (SVM)</span>
                         </div>
                       </motion.div>
                     )}
@@ -1041,9 +1041,9 @@ export default function App() {
                 <div className="glass-card overflow-hidden h-[800px] border-slate-200">
                   <div className="bg-slate-800 text-white px-4 py-2 text-xs font-semibold flex items-center justify-between">
                     <span className="flex items-center gap-2"><Code className="w-4 h-4" /> Swagger UI Interactive Documentation</span>
-                    <a href="http://localhost:8000/docs" target="_blank" rel="noreferrer" className="text-blue-400 hover:text-blue-300 flex items-center gap-1">Open in new tab <Zap className="w-3 h-3"/></a>
+                    <a href="/docs" target="_blank" rel="noreferrer" className="text-blue-400 hover:text-blue-300 flex items-center gap-1">Open in new tab <Zap className="w-3 h-3"/></a>
                   </div>
-                  <iframe src="http://localhost:8000/docs" className="w-full h-full border-0 bg-white" title="API Docs" />
+                  <iframe src="/docs" className="w-full h-full border-0 bg-white" title="API Docs" />
                 </div>
               </motion.div>
             )}

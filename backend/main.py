@@ -21,7 +21,7 @@ all three models. To retrain on OTSU-preprocessed images, rebuild processed_340/
 then refit SVD + scaler + all three classifiers from scratch.
 """
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import numpy as np
@@ -33,6 +33,7 @@ import sys
 import time
 import tempfile
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 from typing import List
 import json
 
@@ -89,6 +90,10 @@ X_train_9d       = None   # 9-D scaled training features (needed for Pegasos ker
 ecg_gatekeeper_model = None # MobileNetV2 Binary ECG Detector (OOD Gatekeeper)
 redis_client     = None   # Optional Redis cache (None = disabled)
 REDIS_CACHE_TTL  = 86400  # 24 hours
+MAX_BATCH_FILES  = 20     # Max files per batch request
+MAX_FILE_BYTES   = 20 * 1024 * 1024   # 20 MB hard limit per upload
+MAX_IMAGE_PX     = 8000   # Reject images wider/taller than this (compression-bomb guard)
+VALID_MODELS     = {"classical", "quantum", "pegasos"}
 
 CLASS_PAIRS = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
 
@@ -485,17 +490,15 @@ def is_valid_ecg_image(img_gray: np.ndarray, img_bgr: np.ndarray | None = None) 
             f"(need ≥30%). Image appears to be text, a screenshot, or a document."
         )
 
-    # Intensity check: mean transitions among oscillating columns must be ≥500.
-    # ECG dataset minimum observed: 4882 transitions/col (mean ~5961).
-    # Text/form pages at full resolution: typically 2000–8000 (overlaps with ECG).
-    # BUT: when combined with col_coverage ≥ 85%, the exam-page scenario is already
-    # rejected. This threshold (500) handles sparse single-lead or low-res ECG scans
-    # that might only have a few hundred transitions per column at low resolution.
+    # Intensity check: mean transitions among oscillating columns must be sufficiently high.
+    # We require a minimum of 500 transitions for high-res scans, OR at least 20% of the 
+    # image height for lower-res scans (e.g. 340x340 images can only mathematically have 340 transitions).
+    min_required_intensity = min(500.0, h * 0.20)
     mean_osc_intensity = float(transitions_per_col[osc_mask].mean())
-    if mean_osc_intensity < 500.0:
+    if mean_osc_intensity < min_required_intensity:
         return False, (
             f"Oscillating columns average only {mean_osc_intensity:.1f} transitions "
-            f"(need ≥500). Signal oscillation frequency is far too low for an ECG waveform — "
+            f"(need ≥{min_required_intensity:.1f}). Signal oscillation frequency is far too low for an ECG waveform — "
             f"image appears to be text, a document, or a non-ECG graphic."
         )
 
@@ -569,26 +572,58 @@ async def predict_ecg(model: str = "classical", file: UploadFile = File(...)):
         )
 
     try:
-        # ── Read uploaded bytes ───────────────────────────────────────────────
-        contents  = await file.read()
-        img_hash  = hashlib.sha256(contents).hexdigest()
+        # ── Validate model_key early — return 400 for unknown models ──────────
         model_key = model.lower().strip()
+        if model_key not in VALID_MODELS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown model '{model}'. Valid options: {sorted(VALID_MODELS)}"
+            )
+
+        # ── Read uploaded bytes with size guard (compression-bomb protection) ──
+        contents = await file.read(MAX_FILE_BYTES + 1)
+        if len(contents) > MAX_FILE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large (>{MAX_FILE_BYTES // (1024*1024)} MB). Upload a smaller ECG image."
+            )
+        img_hash  = hashlib.sha256(contents).hexdigest()
 
         # ── Redis cache check ─────────────────────────────────────────────────
         cache_key = f"qucardio:{model_key}:{img_hash}"
         if redis_client is not None:
             _cached = redis_client.get(cache_key)
             if _cached:
+                cached_result = json.loads(_cached)
+                # Log cache hits to audit DB so every prediction is recorded
+                try:
+                    db.log_prediction(
+                        patient_id=getattr(file, "filename", "unknown"),
+                        image_hash=img_hash,
+                        model_used=MODEL_LABELS.get(model_key, model_key),
+                        predicted_class=cached_result.get("prediction", "Unknown"),
+                        confidence=cached_result.get("confidence", 0.0),
+                        probabilities=cached_result.get("probabilities", {}),
+                    )
+                except Exception:
+                    pass  # Never let audit DB failure break the cache hit
                 print(f"  [predict] CACHE HIT model={model_key}")
-                return json.loads(_cached)
+                return cached_result
 
-        # ── Decode image ──────────────────────────────────────────────────────
+        # ── Decode image with dimension guard (compression-bomb protection) ────
         nparr     = np.frombuffer(contents, np.uint8)
         img_gray  = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
         img_color = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if img_gray is None:
             raise HTTPException(status_code=400, detail="Invalid image file format.")
+
+        h, w = img_gray.shape
+        if h > MAX_IMAGE_PX or w > MAX_IMAGE_PX:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Image dimensions {w}×{h} exceed maximum {MAX_IMAGE_PX}px. Please resize before uploading."
+            )
 
         # ── Step 0: Validate if it's an ECG ──
         if ecg_gatekeeper_model is not None:
@@ -761,12 +796,13 @@ async def predict_ecg(model: str = "classical", file: UploadFile = File(...)):
             "cache_hit": False,
         }
 
-        # Store in Redis (skip the large preprocessed image to save memory)
+        # Store in Redis — exclude the large preprocessed_image to keep memory bounded
         if redis_client is not None:
             try:
                 cacheable = {k: v for k, v in response.items() if k != "preprocessed_image"}
-                cacheable["preprocessed_image"] = response["preprocessed_image"]
                 cacheable["cache_hit"] = True
+                # preprocessed_image is NOT included — cache hits get None for this field
+                # (the frontend handles missing preprocessed_image gracefully)
                 redis_client.setex(cache_key, REDIS_CACHE_TTL, json.dumps(cacheable))
             except Exception as _ce:
                 print(f"  [cache] write failed: {_ce}")
@@ -784,45 +820,51 @@ async def predict_ecg(model: str = "classical", file: UploadFile = File(...)):
 @app.post("/predict/batch")
 async def predict_batch(model: str = "classical", files: List[UploadFile] = File(...)):
     """
-    Batch processing endpoint. Processes a list of uploaded ECG images.
+    Batch processing endpoint. Max 20 files per request.
+    Files are processed sequentially to avoid exhausting RAM with many heavy models.
     """
+    if len(files) > MAX_BATCH_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files: {len(files)}. Maximum is {MAX_BATCH_FILES} per batch."
+        )
+
     results = []
     for file in files:
         try:
-            # We reuse predict_ecg internally
-            # It will process, log to DB, and return the formatted result
             result = await predict_ecg(model=model, file=file)
             results.append({"filename": file.filename, "status": "success", "result": result})
         except HTTPException as e:
             results.append({"filename": file.filename, "status": "error", "detail": e.detail})
         except Exception as e:
             results.append({"filename": file.filename, "status": "error", "detail": str(e)})
-            
+
     return {"batch_results": results}
 
 
 @app.post("/predict/pdf")
-async def predict_pdf(model: str = "classical", file: UploadFile = File(...)):
+async def predict_pdf(
+    background_tasks: BackgroundTasks,
+    model: str = "classical",
+    file: UploadFile = File(...)
+):
     """
     Generate a 1-page PDF clinical report for a single ECG.
+    The temporary PDF is deleted from disk after the response is sent.
     """
     try:
-        # Run prediction
         result = await predict_ecg(model=model, file=file)
-        
-        # Generate PDF
-        pdf_path = generate_pdf_report(result, filename=file.filename)
-        
-        # Return as downloadable file
+        pdf_path = generate_pdf_report(result, filename=file.filename or "report")
+        # Schedule cleanup so /tmp/qucardio_reports doesn't fill the disk
+        background_tasks.add_task(os.remove, pdf_path)
         return FileResponse(
             path=pdf_path,
             media_type="application/pdf",
             filename=f"QuCardio_Report_{file.filename}.pdf"
         )
-    except HTTPException as e:
+    except HTTPException:
         raise
     except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
-
