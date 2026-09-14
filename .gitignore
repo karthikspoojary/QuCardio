@@ -27,6 +27,15 @@ __pycache__/
 !README.md
 
 # ============================
+# Databases & Archives
+# ============================
+*.db
+*.sqlite
+*.sqlite3
+*.zip
+*:Zone.Identifier
+
+# ============================
 # Dataset & Large Data Files
 # ============================
 data/*.npz
@@ -39,6 +48,10 @@ data/test_samples/
 data/ECG_DATA/
 data/new ecg data/
 data/test_data/
+data/ptb-xl/
+data/ptb-xl-images/
+data/ptb-xl-images-train/
+data/NON_ECG_DATA/
 
 # ============================
 # Trained Model Artifacts
@@ -49,12 +62,14 @@ backend/models/*.pkl
 # Results & Generated Files
 # ============================
 results/
+reports/
 
 # ============================
 # Temp Files & Uploads
 # ============================
 temp_uploaded.png
 *.tmp
+scripts/_tmp*
 
 # ============================
 # Node.js (Frontend)
