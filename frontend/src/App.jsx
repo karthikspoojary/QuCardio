@@ -5,11 +5,12 @@ import {
   Activity, Upload, Image as ImageIcon, AlertTriangle, CheckCircle,
   Zap, ChevronRight, Info, Eye, Cpu, FlaskConical, HeartPulse,
   BarChart3, ShieldAlert, X, Moon, Sun, Clock, Download,
-  History, Atom, TrendingUp, Phone
+  History, Atom, TrendingUp, Phone, Layers, Code
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
+import BatchUploadTab from './BatchUploadTab.jsx';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -223,30 +224,54 @@ function ProbabilityBar({ label, value, isTop }) {
 }
 
 // ─── Result Panel ─────────────────────────────────────────────────────────────
-function ResultPanel({ result, resultRef }) {
+function ResultPanel({ result, file, selectedModel, resultRef }) {
+  const [isPdfLoading, setIsPdfLoading] = useState(false);
   const sev       = SEVERITY_STYLES[result.class_info?.severity || 'normal'];
   const SevIcon   = sev.icon;
   const isLowConf = result.confidence_level === 'low';
   const isMI      = result.prediction === 'Myocardial_Infarction';
 
   const handleDownloadPDF = async () => {
-    if (!resultRef?.current) return;
     try {
-      const canvas = await html2canvas(resultRef.current, { scale: 2, useCORS: true, backgroundColor: '#ffffff' });
-      const imgData = canvas.toDataURL('image/png');
-      const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-      const pdfW = pdf.internal.pageSize.getWidth();
-      const pdfH = (canvas.height * pdfW) / canvas.width;
-      pdf.setFontSize(16);
-      pdf.setTextColor(15, 23, 42);
-      pdf.text('QuCardio — ECG Diagnostic Report', 14, 14);
-      pdf.setFontSize(8);
-      pdf.setTextColor(100, 116, 139);
-      pdf.text(`Generated: ${new Date().toLocaleString()}  |  For research purposes only. Not a medical device.`, 14, 20);
-      pdf.addImage(imgData, 'PNG', 0, 26, pdfW, pdfH);
-      pdf.save(`QuCardio_Report_${result.prediction}_${Date.now()}.pdf`);
+      if (file && file instanceof Blob) {
+        setIsPdfLoading(true);
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('model_name', selectedModel || 'classical');
+        const res = await fetch(`http://localhost:8000/predict/pdf`, {
+          method: 'POST',
+          body: formData,
+        });
+        if (!res.ok) throw new Error('Backend PDF generation failed');
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `QuCardio_Report_${file.name}.pdf`;
+        a.click();
+        window.URL.revokeObjectURL(url);
+      } else if (resultRef?.current) {
+        // Fallback for history items where we only have the DOM
+        setIsPdfLoading(true);
+        const canvas = await html2canvas(resultRef.current, { scale: 2, useCORS: true, backgroundColor: '#ffffff' });
+        const imgData = canvas.toDataURL('image/png');
+        const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+        const pdfW = pdf.internal.pageSize.getWidth();
+        const pdfH = (canvas.height * pdfW) / canvas.width;
+        pdf.setFontSize(16);
+        pdf.setTextColor(15, 23, 42);
+        pdf.text('QuCardio — ECG Diagnostic Report', 14, 14);
+        pdf.setFontSize(8);
+        pdf.setTextColor(100, 116, 139);
+        pdf.text(`Generated: ${new Date().toLocaleString()}  |  For research purposes only. Not a medical device.`, 14, 20);
+        pdf.addImage(imgData, 'PNG', 0, 26, pdfW, pdfH);
+        pdf.save(`QuCardio_Report_${result.prediction}_${Date.now()}.pdf`);
+      }
     } catch (err) {
       console.error('PDF generation failed:', err);
+      alert('Failed to generate PDF. Check console for details.');
+    } finally {
+      setIsPdfLoading(false);
     }
   };
 
@@ -275,55 +300,58 @@ function ResultPanel({ result, resultRef }) {
             <span><strong>Recommended Action:</strong> {result.class_info.action}</span>
           </div>
         )}
-        <button onClick={handleDownloadPDF}
-          className="mt-3 w-full flex items-center justify-center gap-2 py-2 text-xs font-semibold text-slate-600 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl transition-colors">
-          <Download className="w-3.5 h-3.5" /> Download PDF Report
+        <button onClick={handleDownloadPDF} disabled={isPdfLoading}
+          className="mt-3 w-full flex items-center justify-center gap-2 py-2 text-xs font-semibold text-slate-600 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl transition-colors disabled:opacity-50 disabled:cursor-wait">
+          <Download className="w-3.5 h-3.5" /> {isPdfLoading ? 'Generating...' : 'Download PDF Report'}
         </button>
       </div>
 
-      {/* Confidence */}
-      <div className="glass-card p-5">
-        <div className="flex items-center justify-between mb-2">
-          <p className="text-xs font-semibold uppercase tracking-widest text-slate-400">Model Confidence</p>
-          <span className={`text-xs font-bold px-2 py-0.5 rounded-full
-            ${result.confidence_level === 'high' ? 'bg-emerald-50 text-emerald-700' :
-              result.confidence_level === 'medium' ? 'bg-amber-50 text-amber-700' :
-              'bg-rose-50 text-rose-700'}`}>
-            {result.confidence_level?.toUpperCase()}
-          </span>
-        </div>
-        <div className="flex items-end gap-1.5 mb-3">
-          <span className="text-4xl font-extrabold text-slate-900">{(result.confidence * 100).toFixed(1)}</span>
-          <span className="text-lg font-medium text-slate-400 mb-1">%</span>
-        </div>
-        <div className="h-2 bg-slate-100 rounded-full overflow-hidden mb-1">
-          <motion.div initial={{ width: 0 }} animate={{ width: `${result.confidence * 100}%` }}
-            transition={{ duration: 1, ease: 'easeOut' }}
-            className="h-full rounded-full"
-            style={{ background: CONFIDENCE_BAR_COLOR[result.confidence_level] }} />
-        </div>
-        {isLowConf && (
-          <div className="mt-2 flex items-start gap-2 p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700">
-            <AlertTriangle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
-            Low confidence — atypical ECG style or image quality issue. Manual clinical review strongly recommended.
+      {/* Grid wrapper for compactness */}
+      <div className="grid md:grid-cols-2 gap-4">
+        {/* Confidence */}
+        <div className="glass-card p-5">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-xs font-semibold uppercase tracking-widest text-slate-400">Model Confidence</p>
+            <span className={`text-xs font-bold px-2 py-0.5 rounded-full
+              ${result.confidence_level === 'high' ? 'bg-emerald-50 text-emerald-700' :
+                result.confidence_level === 'medium' ? 'bg-amber-50 text-amber-700' :
+                'bg-rose-50 text-rose-700'}`}>
+              {result.confidence_level?.toUpperCase()}
+            </span>
           </div>
-        )}
-        <p className="text-[11px] text-slate-400 mt-2 flex items-center gap-1">
-          <Cpu className="w-3 h-3" /> {result.model_used}
-        </p>
-      </div>
+          <div className="flex items-end gap-1.5 mb-3">
+            <span className="text-4xl font-extrabold text-slate-900">{(result.confidence * 100).toFixed(1)}</span>
+            <span className="text-lg font-medium text-slate-400 mb-1">%</span>
+          </div>
+          <div className="h-2 bg-slate-100 rounded-full overflow-hidden mb-1">
+            <motion.div initial={{ width: 0 }} animate={{ width: `${result.confidence * 100}%` }}
+              transition={{ duration: 1, ease: 'easeOut' }}
+              className="h-full rounded-full"
+              style={{ background: CONFIDENCE_BAR_COLOR[result.confidence_level] }} />
+          </div>
+          {isLowConf && (
+            <div className="mt-2 flex items-start gap-2 p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700">
+              <AlertTriangle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+              Low confidence — atypical ECG style or image quality issue. Manual clinical review strongly recommended.
+            </div>
+          )}
+          <p className="text-[11px] text-slate-400 mt-2 flex items-center gap-1">
+            <Cpu className="w-3 h-3" /> {result.model_used}
+          </p>
+        </div>
 
-      {/* Class probabilities */}
-      <div className="glass-card p-5">
-        <p className="text-xs font-semibold uppercase tracking-widest text-slate-400 mb-4 flex items-center gap-2">
-          <BarChart3 className="w-3.5 h-3.5" /> Class Probabilities
-        </p>
-        <div className="flex flex-col gap-2.5">
-          {Object.entries(result.probabilities)
-            .sort((a, b) => b[1] - a[1])
-            .map(([label, value]) => (
-              <ProbabilityBar key={label} label={label} value={value} isTop={label === result.prediction} />
-            ))}
+        {/* Class probabilities */}
+        <div className="glass-card p-5">
+          <p className="text-xs font-semibold uppercase tracking-widest text-slate-400 mb-4 flex items-center gap-2">
+            <BarChart3 className="w-3.5 h-3.5" /> Class Probabilities
+          </p>
+          <div className="flex flex-col gap-2.5">
+            {Object.entries(result.probabilities)
+              .sort((a, b) => b[1] - a[1])
+              .map(([label, value]) => (
+                <ProbabilityBar key={label} label={label} value={value} isTop={label === result.prediction} />
+              ))}
+          </div>
         </div>
       </div>
     </motion.div>
@@ -747,8 +775,10 @@ export default function App() {
 
   const TABS = [
     { id: 'diagnosis',   label: 'Diagnosis',         Icon: HeartPulse },
+    { id: 'batch',       label: 'Batch Upload',       Icon: Layers     },
     { id: 'performance', label: 'Model Performance',  Icon: BarChart3  },
     { id: 'quantum',     label: 'Quantum Insights',   Icon: Atom       },
+    { id: 'api',         label: 'API Docs',           Icon: Code       },
   ];
 
   return (
@@ -974,7 +1004,7 @@ export default function App() {
                     {/* Results */}
                     {result && !isLoading && (
                       <motion.div key="result" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                        <ResultPanel result={result} resultRef={resultRef} />
+                        <ResultPanel result={result} file={file} selectedModel={selectedModel} resultRef={resultRef} />
                         <PipelineFlow result={result} originalImage={preview} />
                         {result.processing_time && <TimingBreakdown timing={result.processing_time} />}
                       </motion.div>
@@ -995,6 +1025,26 @@ export default function App() {
             {activeTab === 'quantum' && (
               <motion.div key="qml" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
                 <QuantumInsightsTab />
+              </motion.div>
+            )}
+
+            {/* ── Batch Upload Tab ─────────────── */}
+            {activeTab === 'batch' && (
+              <motion.div key="batch" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+                <BatchUploadTab selectedModel={selectedModel} />
+              </motion.div>
+            )}
+
+            {/* ── API Docs Tab ─────────────────── */}
+            {activeTab === 'api' && (
+              <motion.div key="api" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+                <div className="glass-card overflow-hidden h-[800px] border-slate-200">
+                  <div className="bg-slate-800 text-white px-4 py-2 text-xs font-semibold flex items-center justify-between">
+                    <span className="flex items-center gap-2"><Code className="w-4 h-4" /> Swagger UI Interactive Documentation</span>
+                    <a href="http://localhost:8000/docs" target="_blank" rel="noreferrer" className="text-blue-400 hover:text-blue-300 flex items-center gap-1">Open in new tab <Zap className="w-3 h-3"/></a>
+                  </div>
+                  <iframe src="http://localhost:8000/docs" className="w-full h-full border-0 bg-white" title="API Docs" />
+                </div>
               </motion.div>
             )}
           </AnimatePresence>

@@ -2,7 +2,7 @@
 QuCardio Backend — FastAPI
 ==========================
 Inference pipeline:
-  ECG image → preprocess_ecg() [OTSU, grid removal, 340×340]
+  ECG image → OLD fixed-threshold pipeline [thresh=200, grid removal, JPEG round-trip, 340×340]
            → ResNet50 pool1_pool [462,400-D]
            → TruncatedSVD [9-D]
            → MinMax scale [0,1]
@@ -10,13 +10,20 @@ Inference pipeline:
            → QSVC            (model=quantum)
            → Pegasos QSVC   (model=pegasos)
 
-CRITICAL — Inference must use preprocess_ecg() (OTSU pipeline) because
-training loaded images from data/processed_340/ which are OTSU-preprocessed.
-Raw grayscale input produces completely different pool1_pool features → wrong predictions.
+CRITICAL — Inference uses the OLD fixed-threshold pipeline (thresh=200, NOT OTSU) because
+data/processed_340/ was built with that old pipeline. The current preprocess_ecg() in
+src/preprocessing/preprocess_ecg.py uses OTSU adaptive thresholding, which produces
+different pixel values → completely different 462K-D pool1_pool features → wrong SVD
+projection → always predicts Arrhythmia regardless of input.
+
+DO NOT replace the inline preprocessing below with preprocess_ecg() — it will break
+all three models. To retrain on OTSU-preprocessed images, rebuild processed_340/ first,
+then refit SVD + scaler + all three classifiers from scratch.
 """
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 import numpy as np
 import cv2
 import joblib
@@ -25,6 +32,15 @@ import os
 import sys
 import time
 import tempfile
+import hashlib
+from typing import List
+import json
+
+try:
+    import redis as redis_lib
+    _REDIS_AVAILABLE = True
+except ImportError:
+    _REDIS_AVAILABLE = False
 
 import tensorflow as tf
 from tensorflow.keras.applications import ResNet50
@@ -39,6 +55,9 @@ from qiskit.quantum_info import Statevector
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from src.preprocessing.preprocess_ecg import preprocess_ecg
+from src.preprocessing.preprocess_inference import preprocess_for_inference
+import backend.database as db
+from backend.pdf_generator import generate_pdf_report
 
 app = FastAPI(title="QuCardio ML Backend", version="3.0.0")
 
@@ -67,6 +86,9 @@ feature_map_pegasos = None # ZZFeatureMap used for Pegasos
 sv_train_qsvc    = None   # Cached training statevectors for QSVC
 sv_train_pegasos = None   # Cached training statevectors for Pegasos
 X_train_9d       = None   # 9-D scaled training features (needed for Pegasos kernel)
+ecg_gatekeeper_model = None # MobileNetV2 Binary ECG Detector (OOD Gatekeeper)
+redis_client     = None   # Optional Redis cache (None = disabled)
+REDIS_CACHE_TTL  = 86400  # 24 hours
 
 CLASS_PAIRS = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
 
@@ -119,11 +141,27 @@ async def load_models():
     global resnet_pool1, svd_reducer, minmax_scaler
     global svm_model, qsvc_model, pegasos_models
     global feature_map_qsvc, feature_map_pegasos, sv_train_qsvc, sv_train_pegasos, X_train_9d
-    global qsvc_feat_variant, qsvc_reps, qsvc_entangle
+    global qsvc_feat_variant, qsvc_reps, qsvc_entangle, redis_client
 
     print("\n" + "="*55)
     print("QuCardio Backend v3.0 — Loading all models")
     print("="*55)
+    
+    print("[0/6] Initializing Audit Database...")
+    db.init_db()
+
+    # ── 0.5 Redis (optional) ──────────────────────────────
+    if _REDIS_AVAILABLE:
+        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+        try:
+            redis_client = redis_lib.from_url(redis_url, decode_responses=True, socket_connect_timeout=2)
+            redis_client.ping()
+            print(f"[0.5] Redis cache connected ✅  ({redis_url})")
+        except Exception as _e:
+            redis_client = None
+            print(f"[0.5] Redis not available ({_e}) — caching disabled (OK for local dev)")
+    else:
+        print("[0.5] redis-py not installed — caching disabled")
 
     # ── 1. ResNet50 → pool1_pool ──────────────────────────────
     print("[1/6] Loading ResNet50 (pool1_pool)...")
@@ -136,6 +174,25 @@ async def load_models():
     print(f"      Output shape: {resnet_pool1.output_shape}")
 
     model_dir = os.path.join(os.path.dirname(__file__), 'models')
+
+    # ── 1.5 Gatekeeper Model (OOD) ───────────────────────────
+    # train_ecg_detector.py saves to project-root models/ecg_detector.keras.
+    # Check both locations so the backend works regardless of where it was saved.
+    _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _gk_candidates = [
+        os.path.join(model_dir, 'ecg_detector.keras'),                  # backend/models/
+        os.path.join(_project_root, 'models', 'ecg_detector.keras'),    # project root models/
+    ]
+    gatekeeper_path = next((p for p in _gk_candidates if os.path.exists(p)), None)
+    if gatekeeper_path:
+        print(f"[1.5/6] Loading ECG Gatekeeper ({os.path.relpath(gatekeeper_path)}) ...")
+        from tensorflow.keras.models import load_model
+        global ecg_gatekeeper_model
+        ecg_gatekeeper_model = load_model(gatekeeper_path)
+        print("      Gatekeeper loaded ✅")
+    else:
+        print("[1.5/6] ⚠️ ECG Gatekeeper not found — falling back to heuristic checks")
+        print("        (searched: backend/models/ and project-root models/)")
 
     # ── 2. SVD + Scaler ──────────────────────────────────────
     print("[2/6] Loading SVD reducer + MinMax scaler...")
@@ -320,10 +377,10 @@ def is_valid_ecg_image(img_gray: np.ndarray, img_bgr: np.ndarray | None = None) 
     ECG images have five key structural properties:
       - Landscape aspect ratio (wider than tall — standard ECG paper format)
       - Near-pure white paper background (>85% bright pixels, very low color saturation)
-      - Dark waveform lines spread across MANY rows (full-height traces)
-      - Thin oscillating lines with HIGH oscillation frequency per column (≥50 mean transitions)
+      - Dark waveform lines spanning ≥65% of rows and ≥85% of columns (full-area traces)
+      - Thin oscillating lines with HIGH oscillation frequency per column (≥500 mean transitions)
       - High-frequency energy in the 2-D FFT (waveform = distributed HF content)
-    Screenshots fail on color-saturation and/or oscillation-intensity checks.
+    Screenshots fail on color-saturation, coverage, and/or oscillation-intensity checks.
     """
     h, w = img_gray.shape
 
@@ -409,9 +466,12 @@ def is_valid_ecg_image(img_gray: np.ndarray, img_bgr: np.ndarray | None = None) 
     # Text glyphs are wide blobs with few transitions per column.
     #
     # Two-part check:
-    #   a) At least 30% of columns must have ≥3 transitions  (existing check)
-    #   b) Among those oscillating columns, the MEAN transition count must be ≥8
-    #      ECG waveforms cross a column axis many times; text edges do it 2–4 times.
+    #   a) At least 30% of columns must have ≥3 transitions  (presence check)
+    #   b) Among those oscillating columns, the MEAN transition count must be ≥500.
+    #      ECG dataset minimum observed: 4882 transitions/col (mean ~5961).
+    #      Text / form pages at full resolution can reach 2000–8000 but are already
+    #      rejected by the col_coverage ≥ 85% check above; the 500 floor handles
+    #      genuine low-resolution or single-lead ECG scans.
     binary_dark = (img_gray < 100).astype(np.uint8)          # 1=dark, 0=light
     col_transitions = np.diff(binary_dark, axis=0)            # shape (h-1, w)
     transitions_per_col = np.abs(col_transitions).sum(axis=0) # (w,) — transitions per column
@@ -509,78 +569,52 @@ async def predict_ecg(model: str = "classical", file: UploadFile = File(...)):
         )
 
     try:
-        # ── Read uploaded bytes → both grayscale and BGR ──────────────────────
+        # ── Read uploaded bytes ───────────────────────────────────────────────
         contents  = await file.read()
+        img_hash  = hashlib.sha256(contents).hexdigest()
+        model_key = model.lower().strip()
+
+        # ── Redis cache check ─────────────────────────────────────────────────
+        cache_key = f"qucardio:{model_key}:{img_hash}"
+        if redis_client is not None:
+            _cached = redis_client.get(cache_key)
+            if _cached:
+                print(f"  [predict] CACHE HIT model={model_key}")
+                return json.loads(_cached)
+
+        # ── Decode image ──────────────────────────────────────────────────────
         nparr     = np.frombuffer(contents, np.uint8)
         img_gray  = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
-        img_color = cv2.imdecode(nparr, cv2.IMREAD_COLOR)   # BGR — for color saturation check
+        img_color = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
         if img_gray is None:
             raise HTTPException(status_code=400, detail="Invalid image file format.")
 
-        # ── Step 0: Validate if it's an ECG (pass BGR for color-saturation check) ──
-        is_ecg, reason = is_valid_ecg_image(img_gray, img_bgr=img_color)
-        if not is_ecg:
-            raise HTTPException(status_code=422, detail=f"Invalid ECG image: {reason}")
+        # ── Step 0: Validate if it's an ECG ──
+        if ecg_gatekeeper_model is not None:
+            # Use ML Gatekeeper
+            img_rgb = cv2.cvtColor(img_color, cv2.COLOR_BGR2RGB)
+            img_resized = cv2.resize(img_rgb, (224, 224))
+            img_prep = tf.keras.applications.mobilenet_v2.preprocess_input(img_resized.astype(np.float32)[np.newaxis, ...])
+            prob_ecg = float(ecg_gatekeeper_model.predict(img_prep, verbose=0)[0][0])
+            if prob_ecg < 0.5:
+                raise HTTPException(status_code=422, detail=f"Image rejected by AI Gatekeeper (Not an ECG). Confidence: {(1-prob_ecg)*100:.1f}%")
+        else:
+            # Fallback to heuristics
+            is_ecg, reason = is_valid_ecg_image(img_gray, img_bgr=img_color)
+            if not is_ecg:
+                raise HTTPException(status_code=422, detail=f"Invalid ECG image: {reason}")
 
-        # Need to reconstruct BGR for the pipeline if required, but training used raw
-        # Let's derive the rest from img_gray (which is the result of imread)
+        # Need BGR array for preprocess_for_inference (it expects BGR input)
         img_bgr = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
 
-        # ── Step 1: Preprocessing — MUST match training pipeline exactly ──────
-        #
-        # HISTORY: data/processed_340/ was built using the OLD preprocess_ecg()
-        # (git commit 278076d) which used:
-        #   - Fixed threshold 200 (THRESH_BINARY_INV) for ROI crop
-        #   - Fixed threshold 200 (THRESH_BINARY) + bitwise_not for background
-        #   - 1×50 kernel for vertical grid removal
-        #   - Resize to 340×340 INTER_AREA
-        #   - Saved as JPEG (quality default ~95) then loaded back as GRAYSCALE
-        #
-        # The current preprocess_ecg() uses OTSU adaptive thresholding which
-        # produces different pixel values → completely different 462K-D features
-        # → wrong SVD projection → always predicts Arrhythmia.
-        #
-        # Fix: replicate the OLD pipeline inline for inference.
-
+        # ── Step 1: Preprocessing (old fixed-threshold pipeline) ──────────────
+        # Delegates to src/preprocessing/preprocess_inference.py which contains
+        # the full pipeline documentation and is shared with all cross-dataset
+        # evaluation scripts (ST-5B, 5C, 5D, 5E).
         t_pre = time.perf_counter()
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        img_for_resnet = preprocess_for_inference(img_bgr)  # float32 [0–255] (340,340)
 
-        # Step 1: ROI crop (old pipeline: fixed threshold 200)
-        _, binary_roi = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
-        contours, _   = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if contours:
-            largest = max(contours, key=cv2.contourArea)
-            x, y, w, h = cv2.boundingRect(largest)
-            pad = 10
-            x = max(0, x - pad);  y = max(0, y - pad)
-            w = min(gray.shape[1] - x, w + 2*pad)
-            h = min(gray.shape[0] - y, h + 2*pad)
-            cropped = gray[y:y+h, x:x+w]
-        else:
-            cropped = gray
-
-        # Step 2: Background removal (old pipeline: thresh 200 → bitwise_not)
-        _, cleaned = cv2.threshold(cropped, 200, 255, cv2.THRESH_BINARY)
-        cleaned    = cv2.bitwise_not(cleaned)
-
-        # Step 3: Remove vertical grid lines (old pipeline: 1×50 kernel)
-        kernel_v   = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 50))
-        vert_lines = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel_v)
-        cleaned    = cv2.subtract(cleaned, vert_lines)
-
-        # Step 4: Resize
-        resized_340 = cv2.resize(cleaned, (340, 340), interpolation=cv2.INTER_AREA)
-
-        # Step 5: JPEG round-trip (training saved as .jpg then reloaded via cv2.IMREAD_GRAYSCALE)
-        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as jtmp:
-            jpeg_path = jtmp.name
-        cv2.imwrite(jpeg_path, resized_340)   # default JPEG quality = ~95
-        img_for_resnet = cv2.imread(jpeg_path, cv2.IMREAD_GRAYSCALE).astype(np.float32)
-        os.remove(jpeg_path)
-
-        # The UI should display the exact ResNet50 input. Since we do a JPEG round-trip,
-        # img_for_resnet is what actually goes into the model.
         display_uint8 = img_for_resnet.astype(np.uint8)
         _, buf = cv2.imencode('.png', display_uint8)
         preprocessed_b64 = base64.b64encode(buf).decode('utf-8')
@@ -609,7 +643,6 @@ async def predict_ecg(model: str = "classical", file: UploadFile = File(...)):
 
         # ── Step 4: Classification ────────────────────────────────────────────
         t_clf = time.perf_counter()
-        model_key = model.lower().strip()
 
         if model_key == 'quantum':
             # ── QSVC: apply feature transform → compute kernel row → SVC.predict ──
@@ -694,12 +727,22 @@ async def predict_ecg(model: str = "classical", file: UploadFile = File(...)):
         if   confidence >= 0.80: confidence_level = "high"
         elif confidence >= 0.55: confidence_level = "medium"
         else:                    confidence_level = "low"
+        
+        # Log prediction to audit database
+        log_id = db.log_prediction(
+            patient_id=getattr(file, "filename", "unknown"),
+            image_hash=img_hash,
+            model_used=MODEL_LABELS.get(model_key, model_key),
+            predicted_class=predicted_class,
+            confidence=confidence,
+            probabilities=prob_dict
+        )
 
         # Debug print so terminal shows what's happening
         print(f"  [predict] model={model_key}  →  {predicted_class}  "
-              f"({confidence*100:.1f}%)  total={total_ms:.0f}ms")
+              f"({confidence*100:.1f}%)  total={total_ms:.0f}ms  log_id={log_id}")
 
-        return {
+        response = {
             "prediction":         predicted_class,
             "confidence":         confidence,
             "confidence_level":   confidence_level,
@@ -715,7 +758,20 @@ async def predict_ecg(model: str = "classical", file: UploadFile = File(...)):
                 "classification_ms":     round(t_clf_ms,  1),
                 "total_ms":              round(total_ms,  1),
             },
+            "cache_hit": False,
         }
+
+        # Store in Redis (skip the large preprocessed image to save memory)
+        if redis_client is not None:
+            try:
+                cacheable = {k: v for k, v in response.items() if k != "preprocessed_image"}
+                cacheable["preprocessed_image"] = response["preprocessed_image"]
+                cacheable["cache_hit"] = True
+                redis_client.setex(cache_key, REDIS_CACHE_TTL, json.dumps(cacheable))
+            except Exception as _ce:
+                print(f"  [cache] write failed: {_ce}")
+
+        return response
 
     except HTTPException:
         raise
@@ -723,3 +779,50 @@ async def predict_ecg(model: str = "classical", file: UploadFile = File(...)):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/predict/batch")
+async def predict_batch(model: str = "classical", files: List[UploadFile] = File(...)):
+    """
+    Batch processing endpoint. Processes a list of uploaded ECG images.
+    """
+    results = []
+    for file in files:
+        try:
+            # We reuse predict_ecg internally
+            # It will process, log to DB, and return the formatted result
+            result = await predict_ecg(model=model, file=file)
+            results.append({"filename": file.filename, "status": "success", "result": result})
+        except HTTPException as e:
+            results.append({"filename": file.filename, "status": "error", "detail": e.detail})
+        except Exception as e:
+            results.append({"filename": file.filename, "status": "error", "detail": str(e)})
+            
+    return {"batch_results": results}
+
+
+@app.post("/predict/pdf")
+async def predict_pdf(model: str = "classical", file: UploadFile = File(...)):
+    """
+    Generate a 1-page PDF clinical report for a single ECG.
+    """
+    try:
+        # Run prediction
+        result = await predict_ecg(model=model, file=file)
+        
+        # Generate PDF
+        pdf_path = generate_pdf_report(result, filename=file.filename)
+        
+        # Return as downloadable file
+        return FileResponse(
+            path=pdf_path,
+            media_type="application/pdf",
+            filename=f"QuCardio_Report_{file.filename}.pdf"
+        )
+    except HTTPException as e:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
