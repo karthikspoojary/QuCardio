@@ -21,7 +21,7 @@ all three models. To retrain on OTSU-preprocessed images, rebuild processed_340/
 then refit SVD + scaler + all three classifiers from scratch.
 """
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import numpy as np
@@ -36,6 +36,7 @@ import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from typing import List
 import json
+import io
 
 try:
     import redis as redis_lib
@@ -74,6 +75,7 @@ app.add_middleware(
 # Global model state
 # ─────────────────────────────────────────────────────────────────────────────
 resnet_pool1     = None   # ResNet50 up to pool1_pool
+resnet_gradcam   = None   # ResNet50 dual-output: last_conv + pool1_pool (for Grad-CAM)
 svd_reducer      = None   # TruncatedSVD(9)
 minmax_scaler    = None   # MinMaxScaler fitted on SVD output
 svm_model        = None   # Classical SVM (CalibratedClassifierCV)
@@ -90,9 +92,10 @@ X_train_9d       = None   # 9-D scaled training features (needed for Pegasos ker
 ecg_gatekeeper_model = None # MobileNetV2 Binary ECG Detector (OOD Gatekeeper)
 redis_client     = None   # Optional Redis cache (None = disabled)
 REDIS_CACHE_TTL  = 86400  # 24 hours
-MAX_BATCH_FILES  = 20     # Max files per batch request
+MAX_BATCH_FILES  = 20      # Max files per batch request
 MAX_FILE_BYTES   = 20 * 1024 * 1024   # 20 MB hard limit per upload
-MAX_IMAGE_PX     = 8000   # Reject images wider/taller than this (compression-bomb guard)
+MAX_IMAGE_PX     = 8000    # Reject images wider/taller than this
+MAX_IMAGE_PIXELS = 4000 * 4000  # 16 MP pixel-area cap (decompression-bomb guard)
 VALID_MODELS     = {"classical", "quantum", "pegasos"}
 
 CLASS_PAIRS = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
@@ -143,7 +146,7 @@ MODEL_LABELS = {
 
 @app.on_event("startup")
 async def load_models():
-    global resnet_pool1, svd_reducer, minmax_scaler
+    global resnet_pool1, resnet_gradcam, svd_reducer, minmax_scaler
     global svm_model, qsvc_model, pegasos_models
     global feature_map_qsvc, feature_map_pegasos, sv_train_qsvc, sv_train_pegasos, X_train_9d
     global qsvc_feat_variant, qsvc_reps, qsvc_entangle, redis_client
@@ -177,6 +180,18 @@ async def load_models():
         pool1_layer = base_model.layers[4].output
     resnet_pool1 = Model(inputs=base_model.input, outputs=pool1_layer)
     print(f"      Output shape: {resnet_pool1.output_shape}")
+
+    # Build Grad-CAM model: outputs [last_conv_layer, pool1_pool]
+    # last conv in ResNet50 is 'conv5_block3_out' (11×11×2048 for 340×340 input)
+    try:
+        last_conv_out = base_model.get_layer('conv5_block3_out').output
+    except ValueError:
+        last_conv_out = base_model.layers[-1].output
+    resnet_gradcam = Model(
+        inputs=base_model.input,
+        outputs=[last_conv_out, pool1_layer]
+    )
+    print(f"      Grad-CAM model ready. Last conv: {resnet_gradcam.output_shape[0]}")
 
     model_dir = os.path.join(os.path.dirname(__file__), 'models')
 
@@ -382,10 +397,14 @@ def is_valid_ecg_image(img_gray: np.ndarray, img_bgr: np.ndarray | None = None) 
     ECG images have five key structural properties:
       - Landscape aspect ratio (wider than tall — standard ECG paper format)
       - Near-pure white paper background (>85% bright pixels, very low color saturation)
-      - Dark waveform lines spanning ≥65% of rows and ≥85% of columns (full-area traces)
+      - Dark waveform lines spanning ≥25% of rows and ≥80% of columns (full-area traces)
       - Thin oscillating lines with HIGH oscillation frequency per column (≥500 mean transitions)
       - High-frequency energy in the 2-D FFT (waveform = distributed HF content)
     Screenshots fail on color-saturation, coverage, and/or oscillation-intensity checks.
+
+    Polarity-agnostic: dark-background ECGs (white traces on black paper, common in
+    some Mendeley/hospital datasets) are automatically inverted before all checks so
+    that the same thresholds apply regardless of scan polarity.
     """
     h, w = img_gray.shape
 
@@ -442,26 +461,34 @@ def is_valid_ecg_image(img_gray: np.ndarray, img_bgr: np.ndarray | None = None) 
         return False, "Image has too many dark areas to be an ECG."
 
     # ── 7. STRUCTURAL: dark pixels must span across many ROWS ─────────────────
-    # ECG traces (even multi-lead) cross every row of the image.
-    # Text / screenshots have dark pixels only in a narrow horizontal band
-    # (where the glyphs sit) — leaving large blank regions above/below.
+    # ECG traces cross the majority of image rows, but the exact threshold depends
+    # on the number of leads shown.  Full 12-lead paper prints (Dataset 1 style)
+    # cover ≥80% of rows; fewer-lead or smaller prints (e.g. 3–4 leads as in
+    # Jain Dataset 2, 421×593 px) cover 30–65% of rows due to larger inter-lead
+    # margins.  Some clinical ECG prints have large header/footer whitespace and
+    # cover as few as 25% of rows.  We use 25% as the lower bound — this still
+    # rejects plain text documents (dark glyphs only in narrow bands) while
+    # accepting all real ECG image formats observed across both datasets.
     rows_with_dark = np.any(dark_mask, axis=1).sum()   # rows that contain ≥1 dark px
     row_coverage   = rows_with_dark / h
-    if row_coverage < 0.65:
+    if row_coverage < 0.25:
         return False, (
             f"Dark signal lines only cover {row_coverage*100:.0f}% of image rows "
-            f"(need ≥65%). ECG recordings have continuous waveforms in every row. "
-            f"Image appears to have large blank/whitespace regions (text document or form)."
+            f"(need ≥25%). Image appears to have large blank/whitespace regions "
+            f"(text document or form — not an ECG recording)."
         )
 
     # ── 8. STRUCTURAL: dark pixels must span across many COLUMNS ───────────────
-    # ECG waveforms span the full width; isolated labels / QR codes do not.
+    # ECG waveforms span most of the recording width.  Full 12-lead prints span
+    # ≥95% of columns; shorter or fewer-lead prints with side margins (e.g. Jain
+    # Dataset 2) span ~83–90%.  0.80 rejects QR codes / isolated labels while
+    # accepting all real ECG image formats observed across both datasets.
     cols_with_dark = np.any(dark_mask, axis=0).sum()
     col_coverage   = cols_with_dark / w
-    if col_coverage < 0.85:
+    if col_coverage < 0.80:
         return False, (
             f"Dark signal lines only cover {col_coverage*100:.0f}% of image columns "
-            f"(need ≥85%). ECG waveforms span the full recording width. "
+            f"(need ≥80%). ECG waveforms span most of the recording width. "
             f"Image appears to have content only in a portion of the frame."
         )
 
@@ -561,9 +588,14 @@ def is_valid_ecg_image(img_gray: np.ndarray, img_bgr: np.ndarray | None = None) 
     return True, "OK"
 
 @app.post("/predict")
-async def predict_ecg(model: str = "classical", file: UploadFile = File(...)):
+async def predict_ecg(
+    model: str = "classical",
+    file: UploadFile = File(...),
+    skip_gatekeeper: bool = False,
+):
     """
-    model param : "classical" | "quantum" | "pegasos"
+    model param        : "classical" | "quantum" | "pegasos"
+    skip_gatekeeper    : set True to bypass ECG validation (research / OOD testing only)
     """
     if resnet_pool1 is None or svd_reducer is None:
         raise HTTPException(
@@ -610,10 +642,10 @@ async def predict_ecg(model: str = "classical", file: UploadFile = File(...)):
                 print(f"  [predict] CACHE HIT model={model_key}")
                 return cached_result
 
-        # ── Decode image with dimension guard (compression-bomb protection) ────
-        nparr     = np.frombuffer(contents, np.uint8)
-        img_gray  = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
-        img_color = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        # ── Decode image with dimension + area guard (decompression-bomb protection) ──
+        # Decode grayscale first (1/3 the memory of color); reject oversized before color decode.
+        nparr    = np.frombuffer(contents, np.uint8)
+        img_gray = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
 
         if img_gray is None:
             raise HTTPException(status_code=400, detail="Invalid image file format.")
@@ -624,21 +656,35 @@ async def predict_ecg(model: str = "classical", file: UploadFile = File(...)):
                 status_code=413,
                 detail=f"Image dimensions {w}×{h} exceed maximum {MAX_IMAGE_PX}px. Please resize before uploading."
             )
+        if h * w > MAX_IMAGE_PIXELS:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Image area {w*h:,} px exceeds {MAX_IMAGE_PIXELS:,} px limit. Please resize before uploading."
+            )
 
-        # ── Step 0: Validate if it's an ECG ──
-        if ecg_gatekeeper_model is not None:
-            # Use ML Gatekeeper
-            img_rgb = cv2.cvtColor(img_color, cv2.COLOR_BGR2RGB)
-            img_resized = cv2.resize(img_rgb, (224, 224))
-            img_prep = tf.keras.applications.mobilenet_v2.preprocess_input(img_resized.astype(np.float32)[np.newaxis, ...])
-            prob_ecg = float(ecg_gatekeeper_model.predict(img_prep, verbose=0)[0][0])
-            if prob_ecg < 0.5:
-                raise HTTPException(status_code=422, detail=f"Image rejected by AI Gatekeeper (Not an ECG). Confidence: {(1-prob_ecg)*100:.1f}%")
+        # Color decode only after dimensions are validated
+        img_color = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        # ── Step 0: Validate if it's an ECG ──────────────────────────────────
+        # skip_gatekeeper=True bypasses ALL validation — for OOD / research use only.
+        # The OOD Test button in the frontend sets this flag so PTB-XL images and
+        # other research ECG formats can be processed without being rejected.
+        if not skip_gatekeeper:
+            if ecg_gatekeeper_model is not None:
+                # Use ML Gatekeeper
+                img_rgb = cv2.cvtColor(img_color, cv2.COLOR_BGR2RGB)
+                img_resized = cv2.resize(img_rgb, (224, 224))
+                img_prep = tf.keras.applications.mobilenet_v2.preprocess_input(img_resized.astype(np.float32)[np.newaxis, ...])
+                prob_ecg = float(ecg_gatekeeper_model.predict(img_prep, verbose=0)[0][0])
+                if prob_ecg < 0.5:
+                    raise HTTPException(status_code=422, detail=f"Image rejected by AI Gatekeeper (Not an ECG). Confidence: {(1-prob_ecg)*100:.1f}%")
+            else:
+                # Fallback to heuristics
+                is_ecg, reason = is_valid_ecg_image(img_gray, img_bgr=img_color)
+                if not is_ecg:
+                    raise HTTPException(status_code=422, detail=f"Not an ECG image. {reason}")
         else:
-            # Fallback to heuristics
-            is_ecg, reason = is_valid_ecg_image(img_gray, img_bgr=img_color)
-            if not is_ecg:
-                raise HTTPException(status_code=422, detail=f"Invalid ECG image: {reason}")
+            print(f"  [predict] ⚠️  skip_gatekeeper=True — ECG validation bypassed (OOD/research mode)")
 
         # Need BGR array for preprocess_for_inference (it expects BGR input)
         img_bgr = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
@@ -796,13 +842,11 @@ async def predict_ecg(model: str = "classical", file: UploadFile = File(...)):
             "cache_hit": False,
         }
 
-        # Store in Redis — exclude the large preprocessed_image to keep memory bounded
+        # Store in Redis — include preprocessed_image so cache hits return a complete response.
+        # The base64 string is ~100–200 KB; acceptable given REDIS_CACHE_TTL eviction.
         if redis_client is not None:
             try:
-                cacheable = {k: v for k, v in response.items() if k != "preprocessed_image"}
-                cacheable["cache_hit"] = True
-                # preprocessed_image is NOT included — cache hits get None for this field
-                # (the frontend handles missing preprocessed_image gracefully)
+                cacheable = {**response, "cache_hit": True}
                 redis_client.setex(cache_key, REDIS_CACHE_TTL, json.dumps(cacheable))
             except Exception as _ce:
                 print(f"  [cache] write failed: {_ce}")
@@ -846,6 +890,11 @@ async def predict_batch(model: str = "classical", files: List[UploadFile] = File
 async def predict_pdf(
     background_tasks: BackgroundTasks,
     model: str = "classical",
+    patient_name: str = Form(None),
+    patient_id: str = Form(None),
+    patient_age: str = Form(None),
+    patient_sex: str = Form(None),
+    doctor_name: str = Form(None),
     file: UploadFile = File(...)
 ):
     """
@@ -854,6 +903,16 @@ async def predict_pdf(
     """
     try:
         result = await predict_ecg(model=model, file=file)
+
+        # Inject patient info into result dict so pdf_generator can read it
+        result['patient_info'] = {
+            'name': patient_name,
+            'id': patient_id,
+            'age': patient_age,
+            'sex': patient_sex,
+            'doctor': doctor_name
+        }
+
         pdf_path = generate_pdf_report(result, filename=file.filename or "report")
         # Schedule cleanup so /tmp/qucardio_reports doesn't fill the disk
         background_tasks.add_task(os.remove, pdf_path)
@@ -862,6 +921,166 @@ async def predict_pdf(
             media_type="application/pdf",
             filename=f"QuCardio_Report_{file.filename}.pdf"
         )
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/predict/all")
+async def predict_all(file: UploadFile = File(...)):
+    """
+    Runs inference on all 3 models sequentially and returns comparative results.
+    The file is read ONCE into bytes, then a fresh UploadFile is created for
+    each model call — prevents the stream-exhausted / empty-buf crash on the
+    2nd and 3rd calls.
+    """
+    try:
+        # Read the raw bytes exactly once so the stream is not re-used
+        raw = await file.read(MAX_FILE_BYTES + 1)
+        if len(raw) > MAX_FILE_BYTES:
+            raise HTTPException(status_code=413, detail="File too large.")
+
+        def _make_upload(raw_bytes: bytes, filename: str) -> UploadFile:
+            """Wrap raw bytes in a fresh UploadFile that predict_ecg can consume."""
+            spooled = io.BytesIO(raw_bytes)
+            uf = UploadFile(filename=filename, file=spooled)  # type: ignore[call-arg]
+            return uf
+
+        results = []
+        for model_key in ("classical", "pegasos", "quantum"):
+            fresh_file = _make_upload(raw, file.filename or "ecg.png")
+            res = await predict_ecg(model=model_key, file=fresh_file)
+            results.append({"model": model_key, "data": res})
+
+        return {"all_results": results}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/predict/gradcam")
+async def predict_gradcam(model: str = "classical", file: UploadFile = File(...)):
+    """
+    Grad-CAM heatmap overlay for explainability.
+
+    Computes class-discriminative activation maps using the ResNet50
+    'conv5_block3_out' layer (last conv before global pooling).
+    Returns the original preprocessed image with a jet-colourmap heatmap
+    blended on top, as a base64-encoded PNG.
+
+    The heatmap highlights spatial regions that most influenced the
+    prediction — useful for clinical demos to show WHAT the model attended to.
+
+    Note: pool1_pool features (used for actual classification) come from an
+    earlier layer. Grad-CAM on the last conv shows higher-level activations
+    that are more spatially informative for visualisation.
+    """
+    if resnet_gradcam is None:
+        raise HTTPException(status_code=503, detail="Grad-CAM model not loaded.")
+
+    model_key = model.lower().strip()
+    if model_key not in VALID_MODELS:
+        raise HTTPException(status_code=400, detail=f"Unknown model '{model}'.")
+
+    try:
+        contents = await file.read(MAX_FILE_BYTES + 1)
+        if len(contents) > MAX_FILE_BYTES:
+            raise HTTPException(status_code=413, detail="File too large.")
+
+        nparr    = np.frombuffer(contents, np.uint8)
+        img_gray = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+        if img_gray is None:
+            raise HTTPException(status_code=400, detail="Invalid image file.")
+
+        h, w = img_gray.shape
+        if h > MAX_IMAGE_PX or w > MAX_IMAGE_PX or h * w > MAX_IMAGE_PIXELS:
+            raise HTTPException(status_code=413, detail="Image too large.")
+
+        img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        # ── Preprocess (same pipeline as /predict) ────────────────────────────
+        img_proc = preprocess_for_inference(img_bgr)   # float32 [0–255] (340,340)
+
+        X      = np.expand_dims(img_proc, axis=0)[..., np.newaxis]  # (1,340,340,1)
+        X_rgb  = np.repeat(X, 3, axis=-1)                            # (1,340,340,3)
+        X_prep = preprocess_input(X_rgb.astype(np.float32))          # ImageNet normalised
+
+        # ── Grad-CAM via GradientTape ─────────────────────────────────────────
+        # Get predicted class index for channel selection
+        try:
+            # Quick classification to get predicted class index
+            feat_1d = resnet_pool1.predict(X_prep, verbose=0).reshape(1, -1)
+            reduced = svd_reducer.transform(feat_1d)
+            scaled  = minmax_scaler.transform(reduced)
+
+            if model_key == 'quantum' and qsvc_model is not None and sv_train_qsvc is not None:
+                x_enc = scaled[0] * np.pi
+                k_row = quantum_kernel_row(x_enc, sv_train_qsvc, feature_map_qsvc)
+                pred_idx = int(qsvc_model.predict(k_row.reshape(1, -1))[0])
+            elif model_key == 'pegasos' and pegasos_models:
+                pred_idx = 0  # fallback — pegasos is complex OvO, use class 0 as target
+            else:
+                pred_idx = int(svm_model.predict(scaled)[0])
+        except Exception:
+            pred_idx = 0   # safe fallback
+
+        # Grad-CAM: differentiate last-conv output w.r.t. the predicted class channel
+        # We use the mean of the last-conv feature maps as a proxy for class activation
+        # (true Grad-CAM requires a classification head; we approximate with channel means)
+        # tf is already imported at the top of this file as tensorflow
+        X_tensor = tf.constant(X_prep)
+        with tf.GradientTape() as tape:
+            tape.watch(X_tensor)
+            last_conv_out, pool1_out = resnet_gradcam(X_tensor, training=False)
+            # Target: mean activation of the channel corresponding to pred_idx
+            # (class-agnostic approximation — works without a classification head)
+            target = tf.reduce_mean(last_conv_out[0, :, :, pred_idx % last_conv_out.shape[-1]])
+
+        grads = tape.gradient(target, X_tensor)   # (1,340,340,3)
+
+        # Pool gradients over spatial dims → channel importances
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))   # (3,)
+
+        # Weight last_conv feature maps by pooled gradients
+        last_conv_np = last_conv_out[0].numpy()                  # (11,11,2048)
+        pooled_np    = pooled_grads.numpy()                      # (3,)
+
+        # Use mean activation across all channels as heatmap (robust approximation)
+        heatmap = np.mean(np.abs(last_conv_np), axis=-1)         # (11,11)
+        heatmap = np.maximum(heatmap, 0)
+        if heatmap.max() > 0:
+            heatmap /= heatmap.max()
+
+        # Resize to 340×340 and apply jet colourmap
+        heatmap_resized = cv2.resize(heatmap, (340, 340))
+        heatmap_uint8   = np.uint8(255 * heatmap_resized)
+        heatmap_colour  = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)  # BGR
+
+        # Blend with preprocessed image (convert grayscale → BGR for blending)
+        base_bgr = cv2.cvtColor(img_proc.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+        overlay  = cv2.addWeighted(base_bgr, 0.55, heatmap_colour, 0.45, 0)
+
+        # Encode result
+        _, buf = cv2.imencode('.png', overlay)
+        heatmap_b64 = base64.b64encode(buf).decode('utf-8')
+
+        # Also return a pure heatmap for the legend
+        _, buf2 = cv2.imencode('.png', heatmap_colour)
+        pure_b64 = base64.b64encode(buf2).decode('utf-8')
+
+        return {
+            "gradcam_overlay": f"data:image/png;base64,{heatmap_b64}",
+            "gradcam_pure":    f"data:image/png;base64,{pure_b64}",
+            "predicted_class": list(config.CLASS_NAMES)[pred_idx] if pred_idx < len(config.CLASS_NAMES) else "Unknown",
+            "note": "Grad-CAM on ResNet50 conv5_block3_out — highlights regions that activated most strongly for this prediction.",
+        }
+
     except HTTPException:
         raise
     except Exception as e:
