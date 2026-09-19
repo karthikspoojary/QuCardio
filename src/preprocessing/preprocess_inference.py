@@ -1,41 +1,23 @@
 """
-preprocess_for_inference — Old Fixed-Threshold ECG Preprocessing Pipeline
-=========================================================================
-This module replicates the preprocessing pipeline that was used when building
+preprocess_for_inference — ECG Preprocessing Pipeline (Fixed-Threshold)
+========================================================================
+This module replicates the preprocessing pipeline used when building
 data/processed_340/ (the training data for all three QuCardio models).
 
-WHY THIS EXISTS
----------------
-The training data (data/processed_340/) was preprocessed with the OLD pipeline:
+The training data was preprocessed with:
   threshold=200, bitwise_not, 1×50 vertical grid removal, resize 340×340,
   save as JPEG then reload as grayscale.
 
-The newer src/preprocessing/preprocess_ecg.py uses OTSU adaptive thresholding,
-which produces different pixel values → different 462K-D ResNet50 features →
-wrong SVD projection → models always predict Arrhythmia.
-
-This module exists so that any script evaluating FROZEN models (frozen SVD/scaler/
-classifiers) can import a single function rather than copy-pasting the pipeline.
-
-USAGE
------
-  from src.preprocessing.preprocess_inference import preprocess_for_inference
-
-  img = preprocess_for_inference("path/to/ecg.jpg")
-  # img: float32 array, shape (340, 340), values in [0, 255]
-  # Pass directly to ResNet50 feature extractor (no /255 normalisation needed here —
-  # the feature extractor applies preprocess_input internally).
-
-  # Also accepts a pre-loaded BGR numpy array:
-  img = preprocess_for_inference(bgr_array)
+This pipeline is kept frozen so that inference features align exactly with
+training features.  The SVD reducer and scaler were both fitted on features
+produced by this pipeline and must not change.
 
 USED BY
 -------
   - backend/main.py  /predict endpoint
-  - src/analysis/cross_dataset_ecgdata.py     (ST-5B)
-  - src/analysis/cross_dataset_newecg_4class.py (ST-5C)
-  - src/analysis/newecg_8class.py             (ST-5D)
-  - src/analysis/augmentation_robustness.py   (ST-5E)
+  - src/analysis/cross_dataset_ecgdata.py
+  - src/analysis/cross_dataset_jain_d2.py
+  - src/analysis/augmentation_robustness.py
 """
 
 import os
@@ -46,7 +28,7 @@ import cv2
 
 def preprocess_for_inference(source, output_size=(340, 340)) -> np.ndarray:
     """
-    Apply the old fixed-threshold preprocessing pipeline to an ECG image.
+    Apply the fixed-threshold preprocessing pipeline to an ECG image.
 
     Parameters
     ----------
@@ -101,7 +83,7 @@ def preprocess_for_inference(source, output_size=(340, 340)) -> np.ndarray:
     resized = cv2.resize(cleaned, output_size, interpolation=cv2.INTER_AREA)
 
     # ── Step 5: JPEG round-trip ───────────────────────────────────────────────
-    # training saved each processed image as .jpg then reloaded via IMREAD_GRAYSCALE,
+    # Training saved each processed image as .jpg then reloaded via IMREAD_GRAYSCALE,
     # introducing mild JPEG compression artefacts. We replicate this exactly.
     with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as jtmp:
         jpeg_path = jtmp.name

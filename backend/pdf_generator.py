@@ -52,12 +52,31 @@ def generate_pdf_report(result_dict: dict, filename: str = "report.pdf") -> str:
     pdf.set_font("helvetica", "", 12)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     pdf.cell(0, 8, f"Date/Time: {timestamp}", ln=True)
-    pdf.cell(0, 8, f"Patient / Source File: {safe_filename}", ln=True)
+    pdf.cell(0, 8, f"Source File: {safe_filename}", ln=True)
 
     # Sanitize model name
     raw_model_name = result_dict.get("model_used", "Classical SVM")
     safe_model_name = _sanitize_latin1(raw_model_name)
     pdf.cell(0, 8, f"Model Engine: {safe_model_name}", ln=True)
+
+    # ── Patient Info (optional) ──
+    patient_info = result_dict.get("patient_info", {})
+    has_patient = patient_info and any(v for v in patient_info.values() if v)
+    if has_patient:
+        pdf.ln(3)
+        pdf.set_font("helvetica", "B", 12)
+        pdf.cell(0, 8, "Patient Information:", ln=True)
+        pdf.set_font("helvetica", "", 11)
+        if patient_info.get("name"):
+            pdf.cell(0, 7, f"  Name:   {_sanitize_latin1(patient_info['name'])}", ln=True)
+        if patient_info.get("id"):
+            pdf.cell(0, 7, f"  ID:     {_sanitize_latin1(patient_info['id'])}", ln=True)
+        if patient_info.get("age"):
+            sex_str = f" / {patient_info['sex']}" if patient_info.get("sex") else ""
+            pdf.cell(0, 7, f"  Age:    {_sanitize_latin1(str(patient_info['age']))}{sex_str}", ln=True)
+        if patient_info.get("doctor"):
+            pdf.cell(0, 7, f"  Doctor: {_sanitize_latin1(patient_info['doctor'])}", ln=True)
+
     pdf.ln(5)
 
     # ── Prediction Results ──

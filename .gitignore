@@ -25,6 +25,11 @@ __pycache__/
 !requirements.txt
 *.md
 !README.md
+!frontend/README.md
+!NOVELTY_CONTRIBUTIONS.md
+!PROJECT_STATUS.md
+!Doc/**/*.md
+!Doc/*.md
 
 # ============================
 # Databases & Archives
@@ -52,6 +57,7 @@ data/ptb-xl/
 data/ptb-xl-images/
 data/ptb-xl-images-train/
 data/NON_ECG_DATA/
+data/ECG Dataset for Heart Condition Classification/
 
 # ============================
 # Trained Model Artifacts
@@ -70,6 +76,12 @@ reports/
 temp_uploaded.png
 *.tmp
 scripts/_tmp*
+scratch*
+calc.py
+check_img.py
+verify_y*.py
+scratchpad_*.py
+*_backup.*
 
 # ============================
 # Node.js (Frontend)

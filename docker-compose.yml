@@ -23,16 +23,22 @@ services:
     container_name: qucardio-backend
     ports:
       - "8000:8000"
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     environment:
       - REDIS_URL=redis://redis:6379
     volumes:
       # Mount trained models from host so we don't bake 1GB+ into the image
       - ./backend/models:/app/backend/models:ro
-      - ./models:/app/models:ro
-      # Mount data folder for statevector caches required by QSVC/Pegasos
-      - ./data:/app/data:ro
-      # Persist SQLite audit log on host
-      - ./backend/audit.db:/app/backend/audit.db
+      # Mount only the three cache files the backend loads — not the entire data tree
+      # (avoids exposing raw training ECG images if the API container is compromised)
+      - ./data/sv_train_qsvc.npz:/app/data/sv_train_qsvc.npz:ro
+      - ./data/sv_train_pegasos.npz:/app/data/sv_train_pegasos.npz:ro
+      - ./data/features_9d.npz:/app/data/features_9d.npz:ro
+      # Persist SQLite audit log — use a named volume so Docker never creates a directory
+      # instead of a file at this path (which would break SQLite on first startup)
+      - qucardio_audit:/app/backend
       # Persist PDF reports
       - /tmp/qucardio_reports:/tmp/qucardio_reports
     depends_on:
@@ -53,7 +59,7 @@ services:
       dockerfile: Dockerfile
     container_name: qucardio-frontend
     ports:
-      - "80:80"
+      - "3000:80"
     depends_on:
       backend:
         condition: service_healthy
@@ -62,3 +68,6 @@ services:
 networks:
   default:
     name: qucardio-network
+
+volumes:
+  qucardio_audit:   # Named volume for SQLite audit DB — prevents directory-vs-file confusion

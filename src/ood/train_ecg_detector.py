@@ -16,6 +16,9 @@ def load_data(ecg_dir="data/ECG_DATA", non_ecg_dir="data/NON_ECG_DATA"):
     
     # We might have too many ECG images (~8000), to balance it a bit we can sample
     # Let's use up to 2000 ECG images and all non-ECG
+    # Sort before shuffling: glob.glob ordering is filesystem-dependent, so the same
+    # seed produces the same subset only if the input list is in a deterministic order.
+    ecg_paths = sorted(ecg_paths)
     np.random.seed(42)  # Seed for deterministic subset selection
     np.random.shuffle(ecg_paths)
     ecg_paths = ecg_paths[:2000]
