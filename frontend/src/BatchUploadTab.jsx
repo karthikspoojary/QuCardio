@@ -57,7 +57,19 @@ export default function BatchUploadTab({ selectedModel }) {
       }
 
       const data = await res.json();
-      setResults(data.batch_results || []);
+      const fetchedResults = (data.batch_results || []).map((r, idx) => ({ ...r, originalFile: files[idx] }));
+      
+      const sevWeight = { 'critical': 3, 'warning': 2, 'normal': 1 };
+      fetchedResults.sort((a, b) => {
+        if (a.status !== 'success') return 1;
+        if (b.status !== 'success') return -1;
+        const sevA = sevWeight[a.result?.class_info?.severity] || 0;
+        const sevB = sevWeight[b.result?.class_info?.severity] || 0;
+        if (sevA !== sevB) return sevB - sevA;
+        return (b.result?.confidence || 0) - (a.result?.confidence || 0);
+      });
+
+      setResults(fetchedResults);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -106,11 +118,10 @@ export default function BatchUploadTab({ selectedModel }) {
     URL.revokeObjectURL(url);
   };
 
-  // Download PDF — match by result index (not filename) to handle duplicate basenames
   const downloadPDF = async (resultIndex) => {
-    const fileObj = files[resultIndex];
     const r = results[resultIndex];
-    if (!fileObj || !r) return;
+    if (!r || !r.originalFile) return;
+    const fileObj = r.originalFile;
     try {
       const formData = new FormData();
       formData.append('file', fileObj);
@@ -270,7 +281,7 @@ export default function BatchUploadTab({ selectedModel }) {
                         <button
                           onClick={() => downloadPDF(i)}
                           className="text-blue-600 hover:text-blue-800 flex items-center gap-1 text-xs font-semibold"
-                          disabled={!files[i]}
+                          disabled={!r.originalFile}
                         >
                           <FileJson className="w-3 h-3" /> PDF
                         </button>

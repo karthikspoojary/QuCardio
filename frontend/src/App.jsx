@@ -11,6 +11,7 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
 import BatchUploadTab from './BatchUploadTab.jsx';
+import AblationExplorer from './AblationExplorer.jsx';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -138,6 +139,47 @@ const MODEL_META = {
   quantum:   { label: 'QSVC ⭐',         acc: 94.62, color: '#8b5cf6' },
 };
 
+function ModelRaceAnimation() {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const tick = setInterval(() => setElapsed(p => p + 100), 100);
+    return () => clearInterval(tick);
+  }, []);
+  
+  const racers = [
+    { label: 'Classical SVM', timeMs: 1000, color: '#3b82f6' },
+    { label: 'Pegasos QSVC', timeMs: 12000, color: '#a78bfa' },
+    { label: 'QSVC', timeMs: 15000, color: '#8b5cf6' },
+  ];
+
+  return (
+    <div className="flex flex-col gap-2.5">
+      {racers.map((r, i) => {
+        const progress = Math.min((elapsed / r.timeMs) * 100, 100);
+        const done = progress === 100;
+        return (
+          <div key={i} className="relative h-7 bg-slate-50 rounded overflow-hidden flex items-center border border-slate-100 shadow-inner">
+            <motion.div 
+              initial={{ width: 0 }}
+              animate={{ width: `${progress}%` }}
+              transition={{ duration: 0.1, ease: 'linear' }}
+              className="absolute top-0 left-0 bottom-0 opacity-20"
+              style={{ background: r.color }}
+            />
+            <div className="z-10 flex justify-between w-full px-3 text-[10px] font-bold text-slate-600">
+              <span className="flex items-center gap-1.5">
+                {done ? <CheckCircle className="w-3 h-3 text-emerald-500"/> : <Activity className="w-3 h-3 text-slate-400 animate-spin"/>}
+                {r.label}
+              </span>
+              <span>{done ? `${(r.timeMs/1000).toFixed(1)}s` : `${(elapsed/1000).toFixed(1)}s`}</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function ComparisonPanel({ file, currentModel }) {
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -178,14 +220,9 @@ function ComparisonPanel({ file, currentModel }) {
       </div>
 
       {loading && (
-        <div className="flex flex-col gap-2">
-          {['Classical SVM (~1s)', 'Pegasos QSVC (~12s)', 'QSVC (~15s)'].map((m, i) => (
-            <div key={i} className="flex items-center gap-3 p-2 rounded-lg bg-slate-50 animate-pulse">
-              <div className="w-2 h-2 rounded-full bg-slate-300" />
-              <span className="text-xs text-slate-400">{m} — running…</span>
-            </div>
-          ))}
-          <p className="text-[10px] text-slate-400 mt-1">Total estimated time: ~28s for all 3 models</p>
+        <div className="mt-2">
+          <ModelRaceAnimation />
+          <p className="text-[10px] text-slate-400 mt-2">Total estimated time: ~15s (concurrent inference)</p>
         </div>
       )}
 
@@ -351,6 +388,23 @@ function PatientForm({ patient, setPatient }) {
   );
 }
 
+function ImageFader({ before, after }) {
+  const [opacity, setOpacity] = useState(50);
+  return (
+    <div className="relative w-full h-[220px] flex flex-col items-center justify-center bg-slate-900 pb-2">
+      <div className="relative w-full flex-1 mb-2">
+        <img src={before} alt="Before" className="absolute inset-0 w-full h-full object-contain pointer-events-none" />
+        <img src={after} alt="After" className="absolute inset-0 w-full h-full object-contain pointer-events-none transition-opacity duration-75" style={{ opacity: opacity / 100 }} />
+      </div>
+      <input type="range" min="0" max="100" value={opacity} onChange={e => setOpacity(e.target.value)} className="w-3/4 max-w-sm accent-blue-500 z-10" />
+      <div className="flex justify-between w-3/4 max-w-sm text-[9px] font-semibold tracking-widest uppercase text-slate-400 mt-1">
+        <span>Original</span>
+        <span>Preprocessed</span>
+      </div>
+    </div>
+  );
+}
+
 // ─── Image Tab Viewer ─────────────────────────────────────────────────────────
 function ImageTabs({ original, preprocessed, file, selectedModel }) {
   const [tab, setTab] = useState('original');
@@ -388,6 +442,7 @@ function ImageTabs({ original, preprocessed, file, selectedModel }) {
   const TABS = [
     { id: 'original',     label: 'Original',         Icon: ImageIcon },
     { id: 'preprocessed', label: 'Preprocessed',      Icon: Eye       },
+    { id: 'compare',      label: 'Compare',           Icon: Layers    },
     { id: 'gradcam',      label: 'Grad-CAM',          Icon: ScanEye   },
   ];
 
@@ -416,6 +471,16 @@ function ImageTabs({ original, preprocessed, file, selectedModel }) {
               : <motion.div key="wait" className="text-slate-500 text-xs flex flex-col items-center gap-2 py-8">
                   <Activity className="w-7 h-7 opacity-40 animate-pulse" />
                   Run analysis to see preprocessed output
+                </motion.div>
+          )}
+          {tab === 'compare' && (
+            preprocessed
+              ? <motion.div key="comp" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="w-full">
+                  <ImageFader before={original} after={preprocessed} />
+                </motion.div>
+              : <motion.div key="waitcomp" className="text-slate-500 text-xs flex flex-col items-center gap-2 py-8">
+                  <Activity className="w-7 h-7 opacity-40 animate-pulse" />
+                  Run analysis to compare
                 </motion.div>
           )}
           {tab === 'gradcam' && (
@@ -597,8 +662,8 @@ function ResultPanel({ result, file, selectedModel, resultRef, patient }) {
             {result.class_info?.severity?.toUpperCase() || 'UNKNOWN'}
           </span>
         </div>
-        <h2 className="text-2xl font-bold mb-1" style={{ color: sev.color }}>
-          {CLASS_LABELS[result.prediction] || result.prediction}
+        <h2 className="text-2xl font-bold mb-1" style={{ color: (result.ood_flag && result.confidence < 0.55) ? '#ef4444' : sev.color }}>
+          {(result.ood_flag && result.confidence < 0.55) ? 'OOD – seek manual review' : (CLASS_LABELS[result.prediction] || result.prediction)}
         </h2>
         <p className="text-sm text-slate-500 mb-3">{result.class_info?.description}</p>
         {result.class_info?.action && (
@@ -636,6 +701,9 @@ function ResultPanel({ result, file, selectedModel, resultRef, patient }) {
               className="h-full rounded-full"
               style={{ background: CONFIDENCE_BAR_COLOR[result.confidence_level] }} />
           </div>
+          <p className="text-[11px] text-slate-500 mt-2 mb-2">
+            Historically, predictions at this confidence are correct about {(result.confidence * 100).toFixed(0)} times in 100.
+          </p>
           {isLowConf && (
             <div className="mt-2 flex items-start gap-2 p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700">
               <AlertTriangle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
@@ -659,6 +727,23 @@ function ResultPanel({ result, file, selectedModel, resultRef, patient }) {
                 <ProbabilityBar key={label} label={label} value={value} isTop={label === result.prediction} />
               ))}
           </div>
+          
+          {/* Kernel Row Heatmap */}
+          {result.kernel_row && (
+            <div className="mt-6 border-t border-slate-100 pt-4">
+              <p className="text-xs font-semibold uppercase tracking-widest text-slate-400 mb-2 flex items-center gap-2">
+                <Atom className="w-3.5 h-3.5" /> Quantum Kernel Activations
+              </p>
+              <div className="w-full flex items-end gap-px h-8 bg-slate-50 rounded p-1 border border-slate-100 overflow-hidden">
+                {result.kernel_row.map((val, i) => (
+                  <div key={i} className="flex-1 bg-violet-600 rounded-t-[1px]" style={{ opacity: Math.max(0.1, val), height: `${Math.max(5, val * 100)}%` }} title={`Training Sample ${i}: ${val.toFixed(4)}`} />
+                ))}
+              </div>
+              <p className="text-[10px] text-slate-400 mt-1.5">
+                Similarity of test sample against all {result.kernel_row.length} training support vectors.
+              </p>
+            </div>
+          )}
         </div>
       </div>
     </motion.div>
@@ -668,6 +753,25 @@ function ResultPanel({ result, file, selectedModel, resultRef, patient }) {
 // ─── Session History Sidebar ──────────────────────────────────────────────────
 function HistorySidebar({ history, activeId, onSelect, onClear }) {
   const SEV_ICON = { normal: '🟢', warning: '🟡', critical: '🔴' };
+
+  const handleExportCSV = async () => {
+    try {
+      const res = await fetch('/history/export');
+      if (!res.ok) throw new Error('Export failed');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'qucardio_audit_log.csv';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert('CSV export failed: ' + e.message);
+    }
+  };
+
   if (history.length === 0) return (
     <div className="text-center py-8 text-slate-400 text-xs">
       <History className="w-8 h-8 mx-auto mb-2 opacity-30" />
@@ -680,7 +784,10 @@ function HistorySidebar({ history, activeId, onSelect, onClear }) {
         <span className="text-xs font-semibold text-slate-400 uppercase tracking-wide">
           {history.length} Analysis{history.length !== 1 ? 'es' : ''}
         </span>
-        <button onClick={onClear} className="text-[10px] text-slate-400 hover:text-rose-500 transition-colors">Clear</button>
+        <div className="flex gap-2 items-center">
+          <button onClick={handleExportCSV} className="text-[10px] font-semibold text-blue-500 hover:text-blue-600 transition-colors flex items-center gap-0.5"><Download className="w-3 h-3" /> CSV</button>
+          <button onClick={onClear} className="text-[10px] text-slate-400 hover:text-rose-500 transition-colors">Clear</button>
+        </div>
       </div>
       {history.map(item => (
         <div key={item.id} onClick={() => onSelect(item)}
@@ -775,7 +882,10 @@ function ModelPerformanceTab() {
 }
 
 // ─── Quantum Insights Tab ─────────────────────────────────────────────────────
-function QuantumInsightsTab() {
+function QuantumInsightsTab({ result, encodingRange }) {
+  const hasFeatures = result?.svd_features?.length === 9;
+  const circuitUrl = hasFeatures ? `/circuit?features=${result.svd_features.join(',')}&encoding_range=${encodingRange}` : null;
+
   return (
     <div className="flex flex-col gap-5">
       <div className="glass-card p-5">
@@ -878,10 +988,14 @@ function QuantumInsightsTab() {
           <CircuitBoard className="w-4 h-4 text-slate-500" /> 9-Qubit ZZFeatureMap Circuit
         </p>
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden p-4 flex justify-center">
-          <img src="/zzfeaturemap_circuit.png" alt="9-Qubit ZZFeatureMap Circuit Diagram" className="w-full max-w-2xl object-contain mix-blend-multiply" />
+          {circuitUrl ? (
+            <img src={circuitUrl} alt="Generated 9-Qubit ZZFeatureMap Circuit" className="w-full max-w-4xl object-contain mix-blend-multiply" />
+          ) : (
+            <img src="/zzfeaturemap_circuit.png" alt="Static 9-Qubit ZZFeatureMap Circuit Diagram" className="w-full max-w-2xl object-contain mix-blend-multiply" />
+          )}
         </div>
         <p className="text-[10px] text-slate-500 mt-2">
-          Generated via Qiskit. This circuit embeds the 9-dimensional classical ECG data into a 512-dimensional quantum state space.
+          {circuitUrl ? 'Live generated via Qiskit using the active test sample\'s features.' : 'Generated via Qiskit. Analyze an ECG to see the live circuit bound to its features.'} This circuit embeds the 9-dimensional classical ECG data into a 512-dimensional quantum state space.
         </p>
       </div>
 
@@ -1222,6 +1336,7 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState('classical');
   const [activeTab, setActiveTab] = useState('diagnosis');
   const [isDark, setIsDark]       = useState(false);
+  const [encodingRange, setEncodingRange] = useState('minmax_0pi');
   const [history, setHistory]     = useState([]);
   const [activeHistId, setActiveHistId] = useState(null);
   const [patient, setPatient]     = useState({ name: '', id: '', age: '', sex: '', doctor: '' });
@@ -1286,7 +1401,7 @@ export default function App() {
     formData.append('file', file);
     try {
       const gkParam = skipGatekeeper ? '&skip_gatekeeper=true' : '';
-      const res = await fetch(`/predict?model=${encodeURIComponent(selectedModel)}${gkParam}`, { method: 'POST', body: formData });
+      const res = await fetch(`/predict?model=${encodeURIComponent(selectedModel)}&encoding_range=${encodingRange}${gkParam}`, { method: 'POST', body: formData });
       if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Server error'); }
       const data = await res.json();
       setResult(data);
@@ -1333,6 +1448,7 @@ export default function App() {
     { id: 'batch',       label: 'Batch Upload',       Icon: Layers     },
     { id: 'performance', label: 'Model Performance',  Icon: BarChart3  },
     { id: 'quantum',     label: 'Quantum Insights',   Icon: Atom       },
+    { id: 'ablation',    label: 'Ablation Explorer',  Icon: FlaskConical },
     { id: 'api',         label: 'API Docs',           Icon: Code       },
   ];
 
@@ -1405,6 +1521,19 @@ export default function App() {
               {selectedModel === 'quantum'   && '⚛️ Quantum kernel SVM. Computes ZZFeatureMap statevector vs 742 training samples (~15s on CPU).'}
               {selectedModel === 'pegasos'   && '🔬 Pegasos SGD · Algorithm 1 decision tree · 3 binary models per prediction (~3–4s).'}
             </p>
+            
+            <div className="mt-4 pt-4 border-t border-slate-100 flex items-center justify-between">
+              <label className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Feature Encoding</label>
+              <select 
+                value={encodingRange}
+                onChange={e => setEncodingRange(e.target.value)}
+                className="text-[10px] bg-slate-50 border border-slate-200 rounded px-2 py-1 outline-none text-slate-600 focus:border-blue-400 transition-colors"
+                disabled={selectedModel === 'classical'}
+              >
+                <option value="minmax_0pi">[0, π] (Optimal)</option>
+                <option value="minmax_01">[0, 1] (Sub-optimal)</option>
+              </select>
+            </div>
           </div>
 
           {/* Session history */}
@@ -1586,7 +1715,14 @@ export default function App() {
             {/* ── Quantum Insights Tab ─────────── */}
             {activeTab === 'quantum' && (
               <motion.div key="qml" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
-                <QuantumInsightsTab />
+                <QuantumInsightsTab result={result} encodingRange={encodingRange} />
+              </motion.div>
+            )}
+
+            {/* ── Ablation Explorer Tab ─────────── */}
+            {activeTab === 'ablation' && (
+              <motion.div key="ablation" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+                <AblationExplorer />
               </motion.div>
             )}
 
@@ -1610,6 +1746,33 @@ export default function App() {
               </motion.div>
             )}
           </AnimatePresence>
+          
+          {/* ── Model Transparency / Card Panel ───────────────────────────── */}
+          <div className="mt-8 glass-card p-6 border-slate-200 text-sm">
+            <h4 className="font-bold text-slate-800 mb-3 flex items-center gap-2">
+              <ShieldAlert className="w-4 h-4 text-slate-500" /> Model Transparency & Limitations
+            </h4>
+            <div className="grid md:grid-cols-2 gap-6 text-slate-600 leading-relaxed text-xs">
+              <div>
+                <p className="font-semibold text-slate-700 mb-1">Intended Use & Provenance</p>
+                <p className="mb-2">
+                  QuCardio models are trained on the PTB-XL ECG dataset (v1.0.3), encompassing 21,837 clinical 12-lead ECG records. 
+                  The models classify waveforms into Normal, Arrhythmia, Myocardial Infarction, and History of MI.
+                </p>
+                <p>
+                  <strong>Warning:</strong> This system is a research prototype evaluating the viability of quantum kernel methods for physiological time-series data. It is <strong>not FDA approved</strong> and must not be used for primary clinical diagnosis.
+                </p>
+              </div>
+              <div>
+                <p className="font-semibold text-slate-700 mb-1">Known Limitations</p>
+                <ul className="list-disc pl-4 space-y-1">
+                  <li><strong>Out of Distribution (OOD):</strong> Models are highly sensitive to artifacts like poor electrode contact or severe baseline wander. The integrated Mahalanobis gatekeeper attempts to flag these, but false negatives occur.</li>
+                  <li><strong>Quantum Simulators:</strong> The QSVC and Pegasos models currently run on noiseless statevector simulators. Deployment on physical QPUs is pending error-mitigation integration.</li>
+                  <li><strong>Image Artifacts:</strong> Inference requires standardized ECG chart formatting. Folded paper, low contrast, and non-standard grid spacing degrade accuracy significantly.</li>
+                </ul>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
