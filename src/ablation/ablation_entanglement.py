@@ -127,14 +127,14 @@ def run():
 
     print("Loading 9D features (minmax_01) …")
     d = np.load(feat_path)
-    X_train = d['train_features'] * np.pi   # → minmax_0pi
+    X_train = d['train_features'] * np.pi   # → minmax_0pi  (all topologies use this)
     X_test  = d['test_features']  * np.pi
     y_train, y_test = d['y_train'], d['y_test']
     print(f"  Train: {X_train.shape}  Test: {X_test.shape}")
 
-    # Cached linear statevectors (from Pegasos training) — shape (742, 512) expected
-    sv_linear_path = config.FEATURES_DIR / 'sv_train_pegasos.npz'
-    sv_linear_test_path = config.FEATURES_DIR / 'sv_test_pegasos.npz'
+    # NOTE: sv_train_pegasos.npz was built under [0,1]+linear and must NOT be
+    # reused here.  Every topology is recomputed fresh under minmax_0pi so that
+    # Table IX / Table 7.4 values are internally consistent.
 
     results = {}
 
@@ -144,21 +144,10 @@ def run():
 
         feature_map = ZZFeatureMap(feature_dimension=9, reps=2, entanglement=topology)
 
-        # Reuse cached linear statevectors if available
-        if topology == 'linear' and sv_linear_path.exists() and sv_linear_test_path.exists():
-            print("  Reusing cached linear statevectors (sv_train_pegasos.npz) …")
-            sv_train = np.load(sv_linear_path,    allow_pickle=True)['sv_train']
-            sv_test  = np.load(sv_linear_test_path, allow_pickle=True)['sv_test']
-            # Verify shape consistency (should be (742, 512))
-            if sv_train.shape != (len(X_train), 2**9):
-                print(f"  WARNING: cached shape {sv_train.shape} unexpected. Recomputing.")
-                sv_train = compute_statevectors(X_train, feature_map)
-                sv_test  = compute_statevectors(X_test,  feature_map)
-        else:
-            print("  Computing train statevectors …")
-            sv_train = compute_statevectors(X_train, feature_map)
-            print("  Computing test statevectors …")
-            sv_test  = compute_statevectors(X_test,  feature_map)
+        print("  Computing train statevectors …")
+        sv_train = compute_statevectors(X_train, feature_map)
+        print("  Computing test statevectors …")
+        sv_test  = compute_statevectors(X_test,  feature_map)
 
         K_train = build_kernel(sv_train, sv_train).astype(np.float32)
         K_test  = build_kernel(sv_test,  sv_train).astype(np.float32)

@@ -85,10 +85,20 @@ def preprocess_for_inference(source, output_size=(340, 340)) -> np.ndarray:
     # ── Step 5: JPEG round-trip ───────────────────────────────────────────────
     # Training saved each processed image as .jpg then reloaded via IMREAD_GRAYSCALE,
     # introducing mild JPEG compression artefacts. We replicate this exactly.
+    #
+    # BUG FIX: previously the tempfile was deleted after cv2.imread but the
+    # delete was not inside a try/finally, so if imread returned None (rare
+    # corrupted resize output) the file would be left on disk indefinitely.
+    # Use try/finally to guarantee cleanup regardless of outcome.
     with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as jtmp:
         jpeg_path = jtmp.name
-    cv2.imwrite(jpeg_path, resized)          # default JPEG quality ≈ 95
-    result = cv2.imread(jpeg_path, cv2.IMREAD_GRAYSCALE).astype(np.float32)
-    os.remove(jpeg_path)
+    try:
+        cv2.imwrite(jpeg_path, resized)      # default JPEG quality ≈ 95
+        reloaded = cv2.imread(jpeg_path, cv2.IMREAD_GRAYSCALE)
+        if reloaded is None:
+            raise ValueError("JPEG round-trip produced an unreadable image — resize output may be corrupt.")
+        result = reloaded.astype(np.float32)
+    finally:
+        os.remove(jpeg_path)
 
     return result  # float32, shape (340, 340), values [0, 255]

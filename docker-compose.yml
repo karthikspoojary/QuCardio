@@ -31,9 +31,13 @@ services:
     volumes:
       # Persist downloaded Keras weights (ResNet50 ~100 MB) across restarts
       - keras_cache:/root/.keras
-      # Live-mount application code so changes reflect immediately without rebuilding:
-      - ./backend:/app/backend
-      - ./src:/app/src
+      # SECURITY FIX: backend/ and src/ were mounted read-write, meaning a
+      # compromised container could overwrite Python source files on the host.
+      # Mount all source paths read-only.  The audit.db file is the only path
+      # that needs write access; mount it explicitly as read-write.
+      - ./backend:/app/backend:ro
+      - ./backend/audit.db:/app/backend/audit.db:rw
+      - ./src:/app/src:ro
       - ./config.py:/app/config.py:ro
       # Mount trained models from host so we don't bake 1GB+ into the image
       - ./backend/models:/app/backend/models:ro

@@ -33,8 +33,8 @@ const CONFIDENCE_BAR_COLOR = { high: '#10b981', medium: '#f59e0b', low: '#ef4444
 // Real results from our trained models (QSVC tuned: minmax_0pi, reps=2, circular, C=5.0)
 const MODEL_PERF = [
   { name: 'Classical SVM',   accuracy: 84.95, precision: 84.17, recall: 84.41, f1: 84.10, color: '#3b82f6' },
-  { name: 'QSVC',            accuracy: 94.62, precision: 95.00, recall: 94.62, f1: 94.50, color: '#8b5cf6' },
-  { name: 'Pegasos QSVC',    accuracy: 91.94, precision: 91.80, recall: 91.94, f1: 91.50, color: '#a78bfa' },
+  { name: 'QSVC',            accuracy: 94.62, precision: 94.85, recall: 94.05, f1: 94.40, color: '#8b5cf6' },
+  { name: 'Pegasos QSVC',    accuracy: 91.94, precision: 91.68, recall: 91.43, f1: 91.30, color: '#a78bfa' },
 ];
 
 const PIPELINE_STEPS = [
@@ -322,7 +322,7 @@ function DropZone({ onFileSelect, isDragging, setIsDragging }) {
       </div>
       <div className="text-center">
         <p className="font-semibold text-slate-700 text-sm">Drop ECG image here</p>
-        <p className="text-xs text-slate-400 mt-0.5">PNG, JPG · Max 10 MB</p>
+        <p className="text-xs text-slate-400 mt-0.5">PNG, JPG · Max 20 MB</p>
       </div>
       <button className="px-4 py-1.5 text-xs font-semibold text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors">
         Browse Files
@@ -434,10 +434,16 @@ function ImageTabs({ original, preprocessed, file, selectedModel }) {
     }
   };
 
-  // Auto-fetch when tab switches to gradcam and we don't have it yet
+  // Auto-fetch when tab switches to gradcam and we don't have it yet.
+  // BUG FIX: `fetchGradCam` was intentionally omitted from the dependency array
+  // to avoid infinite loops, but that left the closure stale (it would always use
+  // the `file` value captured at component mount, not the current one).
+  // Fix: include `fetchGradCam` as a dep.  It is stable across renders because it
+  // only closes over `file` and `selectedModel`, both of which are props/state
+  // whose identity only changes when the user picks a new image.
   useEffect(() => {
     if (tab === 'gradcam' && !gradcam && !gcLoading) setTimeout(fetchGradCam, 0);
-  }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tab, fetchGradCam]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const TABS = [
     { id: 'original',     label: 'Original',         Icon: ImageIcon },
@@ -754,22 +760,29 @@ function ResultPanel({ result, file, selectedModel, resultRef, patient }) {
 function HistorySidebar({ history, activeId, onSelect, onClear }) {
   const SEV_ICON = { normal: '🟢', warning: '🟡', critical: '🔴' };
 
-  const handleExportCSV = async () => {
-    try {
-      const res = await fetch('/history/export');
-      if (!res.ok) throw new Error('Export failed');
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'qucardio_audit_log.csv';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      alert('CSV export failed: ' + e.message);
-    }
+  const handleExportCSV = () => {
+    if (history.length === 0) { alert('No history to export.'); return; }
+    const cols = ['id', 'timestamp', 'filename', 'model', 'prediction', 'confidence'];
+    const rows = history.map(item => [
+      item.id ?? '',
+      item.timestamp ?? '',
+      item.filename ?? '',
+      item.result?.model_used ?? '',
+      item.result?.prediction ?? '',
+      item.result?.confidence != null ? (item.result.confidence * 100).toFixed(1) + '%' : '',
+    ]);
+    const csvContent = [cols, ...rows]
+      .map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(','))
+      .join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'qucardio_audit_log.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   if (history.length === 0) return (
@@ -885,6 +898,14 @@ function ModelPerformanceTab() {
 function QuantumInsightsTab({ result, encodingRange }) {
   const hasFeatures = result?.svd_features?.length === 9;
   const circuitUrl = hasFeatures ? `/circuit?features=${result.svd_features.join(',')}&encoding_range=${encodingRange}` : null;
+  const [circuitSrc, setCircuitSrc] = useState(null);
+  const [circuitLoading, setCircuitLoading] = useState(false);
+
+  useEffect(() => {
+    if (!circuitUrl) { setCircuitSrc(null); return; }
+    setCircuitLoading(true);
+    setCircuitSrc(circuitUrl);
+  }, [circuitUrl]);
 
   return (
     <div className="flex flex-col gap-5">
@@ -897,7 +918,7 @@ function QuantumInsightsTab({ result, encodingRange }) {
             <p className="font-semibold text-violet-700 mb-1 text-xs uppercase tracking-wide">1. Data Encoding</p>
             Classical 9-D ECG features are encoded into quantum states using
             <strong> ZZFeatureMap</strong> — a 9-qubit circuit with 2 repetitions
-            and linear entanglement. Each feature becomes a rotation angle on a qubit.
+            and circular entanglement. Each feature becomes a rotation angle on a qubit.
           </div>
           <div className="bg-violet-50 rounded-xl p-3 border border-violet-100">
             <p className="font-semibold text-violet-700 mb-1 text-xs uppercase tracking-wide">2. Hilbert Space Embedding</p>
@@ -987,15 +1008,23 @@ function QuantumInsightsTab({ result, encodingRange }) {
         <p className="font-semibold text-slate-700 mb-3 flex items-center gap-2">
           <CircuitBoard className="w-4 h-4 text-slate-500" /> 9-Qubit ZZFeatureMap Circuit
         </p>
-        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden p-4 flex justify-center">
-          {circuitUrl ? (
-            <img src={circuitUrl} alt="Generated 9-Qubit ZZFeatureMap Circuit" className="w-full max-w-4xl object-contain mix-blend-multiply" />
-          ) : (
-            <img src="/zzfeaturemap_circuit.png" alt="Static 9-Qubit ZZFeatureMap Circuit Diagram" className="w-full max-w-2xl object-contain mix-blend-multiply" />
+        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden p-4 flex justify-center relative">
+          {circuitLoading && circuitSrc && (
+            <div className="absolute inset-0 flex items-center justify-center bg-white/80 z-10 text-xs text-slate-400">Generating circuit…</div>
           )}
+          <img
+            src={circuitSrc || '/zzfeaturemap_circuit.png'}
+            alt="9-Qubit ZZFeatureMap Circuit"
+            className="w-full max-w-4xl object-contain mix-blend-multiply"
+            onLoad={() => setCircuitLoading(false)}
+            onError={() => { setCircuitSrc('/zzfeaturemap_circuit.png'); setCircuitLoading(false); }}
+          />
         </div>
         <p className="text-[10px] text-slate-500 mt-2">
-          {circuitUrl ? 'Live generated via Qiskit using the active test sample\'s features.' : 'Generated via Qiskit. Analyze an ECG to see the live circuit bound to its features.'} This circuit embeds the 9-dimensional classical ECG data into a 512-dimensional quantum state space.
+          {circuitSrc && circuitSrc !== '/zzfeaturemap_circuit.png'
+            ? "Live generated via Qiskit using the active test sample's features."
+            : 'Generated via Qiskit. Analyze an ECG to see the live circuit bound to its features.'
+          } This circuit embeds the 9-dimensional classical ECG data into a 512-dimensional quantum state space.
         </p>
       </div>
 
@@ -1388,13 +1417,17 @@ export default function App() {
     reader.readAsDataURL(f);
   };
 
-  const handleClear = () => {
+  // BUG FIX: wrap in useCallback so that the keyboard-shortcut useEffect below
+  // can include these functions in its dependency array without causing an infinite
+  // re-render cycle.  Both functions only depend on state setters (stable) plus the
+  // values explicitly listed in the dep arrays.
+  const handleClear = useCallback(() => {
     setFile(null); setPreview(null); setResult(null);
     setError(null); setImageWarning(null); setActiveHistId(null);
     setSkipGatekeeper(false);
-  };
+  }, []);
 
-  const handleAnalyze = async () => {
+  const handleAnalyze = useCallback(async () => {
     if (!file || !file.size) return;
     setIsLoading(true); setError(null); setResult(null);
     const formData = new FormData();
@@ -1420,17 +1453,26 @@ export default function App() {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [file, skipGatekeeper, selectedModel, encodingRange, preview]);
 
   const handleHistorySelect = (item) => {
     setActiveHistId(item.id);
     setResult(item.result);
     setPreview(item.preview);
-    setFile({ name: item.filename });
+    // BUG FIX: previously set `file` to a plain object `{ name: item.filename }`.
+    // `handleAnalyze` guards with `if (!file || !file.size) return;`, so a plain
+    // object (no `.size`) silently prevented re-analysis of history items.
+    // Use `null` instead — history items are display-only; re-analysis requires
+    // the user to upload the original file again.
+    setFile(null);
     setActiveTab('diagnosis');
   };
 
   // Keyboard shortcuts
+  // BUG FIX: `handleAnalyze` and `handleClear` were missing from the dep array,
+  // causing the Space-bar shortcut to call a stale closure that captured the
+  // `file` and `isLoading` values from the first render.  Including all referenced
+  // identities ensures the handler always sees the latest state.
   useEffect(() => {
     const onKey = (e) => {
       if (e.target.tagName === 'INPUT') return;
@@ -1440,8 +1482,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [file, isLoading]);
+  }, [file, isLoading, handleAnalyze, handleClear]);
 
   const TABS = [
     { id: 'diagnosis',   label: 'Diagnosis',         Icon: HeartPulse },

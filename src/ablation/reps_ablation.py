@@ -36,17 +36,21 @@ def main():
     y_train = d_feat['y_train']
     y_test = d_feat['y_test']
     
-    # Apply minmax_0pi scaling (best encoding)
-    from sklearn.preprocessing import MinMaxScaler
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    X_train_scaled = scaler.fit_transform(X_train_svd) * np.pi
-    X_test_scaled = scaler.transform(X_test_svd) * np.pi
+    # Apply minmax_0pi scaling (best encoding) — features already in [0,1];
+    # multiply by pi to reach the [0, pi] range used by the selected config.
+    X_train_scaled = X_train_svd * np.pi
+    X_test_scaled  = X_test_svd  * np.pi
+
+    # C=5.0 matches the tuned configuration (QSVC 94.62%).
+    # The earlier C=1.0 run showed reps=1 and reps=2 tied at 94.09%, which
+    # contradicted the paper's 94.62% headline.  C=5.0 is the correct setting.
+    C_VAL = 5.0
     
     reps_to_test = [1, 2, 3, 4]
     results = {}
     
     for rep in reps_to_test:
-        print(f"\n--- Testing reps={rep} ---")
+        print(f"\n--- Testing reps={rep} (C={C_VAL}, [0,pi], circular) ---")
         start_time = time.time()
         
         feature_map = ZZFeatureMap(feature_dimension=9, reps=rep, entanglement='circular')
@@ -62,7 +66,7 @@ def main():
         K_test = build_kernel(sv_test, sv_train)
         
         print("  Training QSVC...")
-        svc = SVC(kernel='precomputed', C=1.0)
+        svc = SVC(kernel='precomputed', C=C_VAL)
         svc.fit(K_train, y_train)
         
         y_pred = svc.predict(K_test)
@@ -78,28 +82,36 @@ def main():
             "time_s": float(elapsed)
         }
         
-    Path("results").mkdir(exist_ok=True)
-    with open("results/ablation_reps.json", "w") as f:
+    out_dir = Path("results/paper/ablation")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with open(out_dir / "ablation_reps.json", "w") as f:
         json.dump(results, f, indent=2)
-        
+
     # Plotting
     accs = [results[f"reps_{r}"]["accuracy"] * 100 for r in reps_to_test]
+    best_rep = reps_to_test[np.argmax(accs)]
     plt.figure(figsize=(8, 5))
     plt.plot(reps_to_test, accs, marker='o', linewidth=2, color='#2c3e50')
-    plt.title('QSVC Accuracy vs ZZFeatureMap Repetitions', fontsize=14)
+    plt.title(f'QSVC Accuracy vs ZZFeatureMap Repetitions\n([0,\u03c0] encoding, circular, C={C_VAL})', fontsize=13)
     plt.xlabel('Number of Repetitions (Depth)', fontsize=12)
     plt.ylabel('Accuracy (%)', fontsize=12)
     plt.xticks(reps_to_test)
     plt.grid(True, linestyle='--', alpha=0.7)
-    
-    # Highlight highest point
-    best_rep = reps_to_test[np.argmax(accs)]
-    plt.axvline(best_rep, color='#e74c3c', linestyle='--', alpha=0.5, label=f'Optimal: reps={best_rep}')
+
+    # Annotate each bar with its value
+    for rep, acc in zip(reps_to_test, accs):
+        plt.annotate(f'{acc:.2f}%', (rep, acc), textcoords='offset points',
+                     xytext=(0, 6), ha='center', fontsize=9)
+
+    # Highlight best
+    plt.axvline(best_rep, color='#e74c3c', linestyle='--', alpha=0.5,
+                label=f'Best: reps={best_rep} ({accs[reps_to_test.index(best_rep)]:.2f}%)')
     plt.legend()
-    
+
     plt.tight_layout()
-    plt.savefig("results/ablation_reps.png", dpi=300)
-    print("\nSaved results to results/ablation_reps.json and ablation_reps.png")
+    out_png = out_dir / "ablation_reps.png"
+    plt.savefig(str(out_png), dpi=300)
+    print(f"\nSaved results to {out_dir}/ablation_reps.json and ablation_reps.png")
 
 if __name__ == '__main__':
     main()

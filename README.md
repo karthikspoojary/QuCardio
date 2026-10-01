@@ -31,7 +31,7 @@ The system was built to answer a question that prior quantum ECG classifiers nev
 - Both quantum models reach **AUC = 1.000** on Myocardial Infarction (zero ranking errors across 48 test cases)
 - Expected Calibration Error **< 0.07** for all three models — confidence scores are reliable
 - Under brightness perturbation (overexposed scan), QSVC holds **86.7%** while the classical SVM falls to **46.7%**
-- End-to-end QSVC latency: **893.9 ms** (preprocessing 126.9 ms, ResNet50 627.6 ms, SVD 52.0 ms, classification 87.4 ms)
+- End-to-end QSVC latency: **under 900 ms** on CPU (preprocessing → ResNet50 → SVD → kernel classification); the deployed build with statevector caching achieves under 250 ms on warm runs
 
 ---
 

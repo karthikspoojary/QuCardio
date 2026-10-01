@@ -66,9 +66,17 @@ from backend.pdf_generator import generate_pdf_report
 
 app = FastAPI(title="QuCardio ML Backend", version="3.0.0")
 
+# SECURITY: allow_credentials=True is incompatible with allow_origins=["*"].
+# Browsers refuse credentialled cross-origin requests when the response contains
+# Access-Control-Allow-Origin: *.  Use explicit origins from the environment so
+# the config stays correct in every deployment (dev / Docker / prod).
+_CORS_ORIGINS = [o.strip() for o in
+    os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",")
+    if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -228,17 +236,61 @@ async def load_models():
         print("[1.6] ⚠️ Mahalanobis guard not found — feature-space OOD check disabled")
 
     # ── 2. SVD + Scaler ──────────────────────────────────────
+    # SECURITY: joblib/pickle can execute arbitrary code when deserialising.
+    # Models come from the project's own backend/models/ directory, which is
+    # mounted read-only in Docker.  As an additional layer, reject pickle streams
+    # that reference unexpected top-level module prefixes before importing them.
+    def _check_pkl_safety(path: str) -> None:
+        """
+        Walk the pickle opcodes and reject any GLOBAL or STACK_GLOBAL instruction
+        that names a module outside of the known-safe prefixes.  Raises ValueError
+        if a suspicious entry is found so load_models() aborts with a clear error
+        instead of executing injected code.
+        """
+        import pickle as _pkl
+        import pickletools as _pt
+        import io as _io
+
+        safe_prefixes = (
+            "numpy", "sklearn", "builtins", "collections", "_codecs",
+            "copyreg", "abc", "_abc", "copy_reg",
+        )
+        with open(path, "rb") as _fh:
+            raw = _fh.read()
+        # joblib may gzip-compress the payload; try transparent decompression.
+        try:
+            import gzip
+            raw = gzip.decompress(raw)
+        except Exception:
+            pass
+        try:
+            ops = list(_pt.genops(_io.BytesIO(raw)))
+        except Exception:
+            return  # cannot parse — let joblib handle it normally
+        for opcode, arg, _ in ops:
+            if opcode.name in ("GLOBAL", "STACK_GLOBAL") and isinstance(arg, str):
+                module = arg.split(" ")[0].split(".")[0]
+                if not any(module.startswith(p) for p in safe_prefixes):
+                    raise ValueError(
+                        f"Refusing to load model file '{path}': "
+                        f"contains unexpected module reference '{arg}'."
+                    )
+
     print("[2/6] Loading SVD reducer + MinMax scaler...")
+    _check_pkl_safety(os.path.join(model_dir, 'svd_reducer.pkl'))
     svd_reducer   = joblib.load(os.path.join(model_dir, 'svd_reducer.pkl'))
+    _check_pkl_safety(os.path.join(model_dir, 'minmax_scaler.pkl'))
     minmax_scaler = joblib.load(os.path.join(model_dir, 'minmax_scaler.pkl'))
 
     # ── 3. Classical SVM ─────────────────────────────────────
     print("[3/6] Loading Classical SVM...")
+    _check_pkl_safety(os.path.join(model_dir, 'svm_model.pkl'))
     svm_model = joblib.load(os.path.join(model_dir, 'svm_model.pkl'))
     print(f"      SVM loaded ✅  (CalibratedClassifierCV, RBF C=10)")
 
     # ── 4. QSVC + meta ───────────────────────────────────────
     print("[4/6] Loading QSVC (tuned — 94.62%)...")
+    _check_pkl_safety(os.path.join(model_dir, 'qsvc_model.pkl'))
     qsvc_model = joblib.load(os.path.join(model_dir, 'qsvc_model.pkl'))
     # Load tuning meta (feature variant, reps, entanglement) saved by tune_qsvc.py
     meta_path = os.path.join(model_dir, 'qsvc_meta.json')
@@ -261,6 +313,7 @@ async def load_models():
     for c1, c2 in CLASS_PAIRS:
         path = os.path.join(model_dir, f'pegasos_{c1}_{c2}.pkl')
         if os.path.exists(path):
+            _check_pkl_safety(path)
             pegasos_models[(c1, c2)] = joblib.load(path)
             print(f"      pegasos_{c1}_{c2} ✅")
         else:
@@ -305,6 +358,25 @@ async def load_models():
         print(f"      X_train_9d loaded ✅  shape={X_train_9d.shape}")
     else:
         print(f"      ⚠️  features_9d.npz not found — Pegasos inference disabled")
+
+    # ── 7. JIT warmup — pre-compile Qiskit assign_parameters + Statevector ──
+    # The first call to Statevector(bound_circuit) triggers Qiskit's internal
+    # transpiler and numpy JIT, adding ~1–3 s of latency to the first real
+    # request.  Running one dummy computation here moves that cost to startup.
+    print("[Warmup] Pre-compiling Qiskit circuits…")
+    try:
+        _dummy = np.zeros(config.FEATURE_DIMENSION)
+        if feature_map_qsvc is not None:
+            from qiskit.quantum_info import Statevector as _SV
+            _b = feature_map_qsvc.assign_parameters(_dummy)
+            _ = _SV(_b).data
+        if feature_map_pegasos is not None:
+            from qiskit.quantum_info import Statevector as _SV
+            _b = feature_map_pegasos.assign_parameters(_dummy)
+            _ = _SV(_b).data
+        print("      Warmup done ✅")
+    except Exception as _we:
+        print(f"      Warmup skipped: {_we}")
 
     print("\n✅ All models ready!")
     print("="*55 + "\n")
@@ -883,15 +955,19 @@ async def predict_ecg(
         elif confidence >= 0.55: confidence_level = "medium"
         else:                    confidence_level = "low"
         
-        # Log prediction to audit database
-        log_id = db.log_prediction(
-            patient_id=getattr(file, "filename", "unknown"),
-            image_hash=img_hash,
-            model_used=MODEL_LABELS.get(model_key, model_key),
-            predicted_class=predicted_class,
-            confidence=confidence,
-            probabilities=prob_dict
-        )
+        # Log prediction to audit database — failure must never abort a prediction
+        log_id = None
+        try:
+            log_id = db.log_prediction(
+                patient_id=getattr(file, "filename", "unknown"),
+                image_hash=img_hash,
+                model_used=MODEL_LABELS.get(model_key, model_key),
+                predicted_class=predicted_class,
+                confidence=confidence,
+                probabilities=prob_dict
+            )
+        except Exception as _db_err:
+            print(f"  [predict] WARNING: audit log write failed: {_db_err}")
 
         # Debug print so terminal shows what's happening
         print(f"  [predict] model={model_key}  →  {predicted_class}  "
@@ -977,6 +1053,12 @@ async def predict_pdf(
     """
     Generate a 1-page PDF clinical report for a single ECG.
     The temporary PDF is deleted from disk after the response is sent.
+
+    BUG FIX: background_tasks.add_task(os.remove, pdf_path) was scheduled
+    BEFORE returning FileResponse, which meant the delete task could fire
+    before the response body was fully streamed to the client (race condition).
+    Fix: pass background_tasks into FileResponse so FastAPI deletes the file
+    only after the response is completely sent.
     """
     try:
         result = await predict_ecg(model=model, file=file)
@@ -991,12 +1073,13 @@ async def predict_pdf(
         }
 
         pdf_path = generate_pdf_report(result, filename=file.filename or "report")
-        # Schedule cleanup so /tmp/qucardio_reports doesn't fill the disk
-        background_tasks.add_task(os.remove, pdf_path)
+        # FileResponse.background runs AFTER the response body is fully sent,
+        # preventing the race condition where the file was deleted mid-transfer.
         return FileResponse(
             path=pdf_path,
             media_type="application/pdf",
-            filename=f"QuCardio_Report_{file.filename}.pdf"
+            filename=f"QuCardio_Report_{file.filename}.pdf",
+            background=background_tasks,
         )
     except HTTPException:
         raise
@@ -1013,7 +1096,7 @@ async def predict_all(file: UploadFile = File(...)):
     The file is read ONCE into bytes, then a fresh UploadFile is created for
     each model call — prevents the stream-exhausted / empty-buf crash.
     All three models run in parallel via asyncio.gather so total time ≈ slowest
-    model (~15s) rather than the sum (~30s).
+    model rather than the sum of all three.
     """
     try:
         # Read the raw bytes exactly once so the stream is not re-used
@@ -1176,6 +1259,9 @@ async def predict_gradcam(model: str = "classical", file: UploadFile = File(...)
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Allowed encoding ranges for the /circuit endpoint
+_VALID_ENCODING_RANGES = {"minmax_0pi", "minmax_01", "l2_norm"}
+
 @app.get("/circuit")
 async def get_circuit(
     features: str,
@@ -1183,14 +1269,28 @@ async def get_circuit(
 ):
     from fastapi.responses import StreamingResponse
     import io
-    
+
     if feature_map_qsvc is None:
         raise HTTPException(status_code=503, detail="Quantum feature map not loaded")
-        
+
+    # SECURITY: validate encoding_range against allowlist before using it
+    if encoding_range not in _VALID_ENCODING_RANGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid encoding_range '{encoding_range}'. "
+                   f"Allowed: {sorted(_VALID_ENCODING_RANGES)}"
+        )
+
     try:
-        x_scaled = np.array([float(x) for x in features.split(",")])
-        if len(x_scaled) != 9:
-            raise ValueError("Expected 9 features")
+        # SECURITY: parse each token individually and reject non-finite values
+        # (prevents NaN/Inf injection that could crash the Qiskit circuit)
+        raw_tokens = features.split(",")
+        if len(raw_tokens) != 9:
+            raise ValueError("Expected exactly 9 comma-separated features")
+        parsed = [float(t) for t in raw_tokens]
+        if not all(np.isfinite(v) for v in parsed):
+            raise ValueError("Feature values must be finite numbers (no NaN/Inf)")
+        x_scaled = np.array(parsed)
             
         if encoding_range == "minmax_0pi":
             x_enc = x_scaled * np.pi
@@ -1213,29 +1313,53 @@ async def get_circuit(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+# SECURITY: simple API-key guard for the history export endpoint.
+# Set EXPORT_API_KEY in the environment.  If unset, export is disabled entirely
+# so a misconfigured deployment cannot accidentally expose patient audit data.
+_EXPORT_API_KEY = os.environ.get("EXPORT_API_KEY", "")
+
+from fastapi import Header
+
 @app.get("/history/export")
-async def export_history():
+async def export_history(x_api_key: str = Header(default="")):
+    """
+    Export the full audit log as CSV.
+
+    SECURITY: requires the X-Api-Key header to match the EXPORT_API_KEY
+    environment variable.  Set EXPORT_API_KEY to a strong random secret
+    before deploying.  Leaving it empty disables the endpoint entirely.
+    """
     import sqlite3
     import csv
     import io
     from fastapi.responses import StreamingResponse
-    
+
+    if not _EXPORT_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="History export is disabled. Set EXPORT_API_KEY in the environment to enable it."
+        )
+    if x_api_key != _EXPORT_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Api-Key header.")
+
     try:
         conn = sqlite3.connect(db.DATABASE_URL)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM audit_log ORDER BY timestamp DESC")
         rows = cursor.fetchall()
         cols = [description[0] for description in cursor.description]
-        
+
         output = io.StringIO()
         writer = csv.writer(output)
         writer.writerow(cols)
         writer.writerows(rows)
-        
+
         output.seek(0)
         response = StreamingResponse(iter([output.getvalue()]), media_type="text/csv")
         response.headers["Content-Disposition"] = "attachment; filename=qucardio_audit_log.csv"
         return response
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
