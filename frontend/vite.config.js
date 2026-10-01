@@ -6,14 +6,17 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
-    // Dev proxy: forwards /predict*, /health, /docs → FastAPI on :8000
+    // Dev proxy: forwards all API paths → FastAPI on :8000
     // This makes relative fetch('/predict') work identically in both
     // "npm run dev" (Vite :5173) and Docker/nginx (same-origin) workflows.
     proxy: {
-      '/predict': 'http://localhost:8000',
-      '/health':  'http://localhost:8000',
-      '/docs':    'http://localhost:8000',
-      '/openapi': 'http://localhost:8000',
+      '/predict':       { target: 'http://localhost:8000', changeOrigin: true },
+      '/health':        { target: 'http://localhost:8000', changeOrigin: true },
+      '/docs':          { target: 'http://localhost:8000', changeOrigin: true },
+      '/openapi':       { target: 'http://localhost:8000', changeOrigin: true },
+      '/circuit':       { target: 'http://localhost:8000', changeOrigin: true },
+      '/history':       { target: 'http://localhost:8000', changeOrigin: true },
+      '/ablation_data': { target: 'http://localhost:8000', changeOrigin: true },
     },
   },
 })

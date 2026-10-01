@@ -34,6 +34,7 @@ import time
 import tempfile
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
+import asyncio
 from typing import List
 import json
 import io
@@ -58,14 +59,24 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from src.preprocessing.preprocess_ecg import preprocess_ecg
 from src.preprocessing.preprocess_inference import preprocess_for_inference
+from src.ood.ood_guards import MahalanobisGuard, is_ecg_by_periodicity, \
+    ecg_periodicity_score, axis_angle_fraction
 import backend.database as db
 from backend.pdf_generator import generate_pdf_report
 
 app = FastAPI(title="QuCardio ML Backend", version="3.0.0")
 
+# SECURITY: allow_credentials=True is incompatible with allow_origins=["*"].
+# Browsers refuse credentialled cross-origin requests when the response contains
+# Access-Control-Allow-Origin: *.  Use explicit origins from the environment so
+# the config stays correct in every deployment (dev / Docker / prod).
+_CORS_ORIGINS = [o.strip() for o in
+    os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",")
+    if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -90,6 +101,7 @@ sv_train_qsvc    = None   # Cached training statevectors for QSVC
 sv_train_pegasos = None   # Cached training statevectors for Pegasos
 X_train_9d       = None   # 9-D scaled training features (needed for Pegasos kernel)
 ecg_gatekeeper_model = None # MobileNetV2 Binary ECG Detector (OOD Gatekeeper)
+mahal_guard      = None   # Mahalanobis distance OOD guard (fitted on 9-D SVD features)
 redis_client     = None   # Optional Redis cache (None = disabled)
 REDIS_CACHE_TTL  = 86400  # 24 hours
 MAX_BATCH_FILES  = 20      # Max files per batch request
@@ -149,7 +161,7 @@ async def load_models():
     global resnet_pool1, resnet_gradcam, svd_reducer, minmax_scaler
     global svm_model, qsvc_model, pegasos_models
     global feature_map_qsvc, feature_map_pegasos, sv_train_qsvc, sv_train_pegasos, X_train_9d
-    global qsvc_feat_variant, qsvc_reps, qsvc_entangle, redis_client
+    global qsvc_feat_variant, qsvc_reps, qsvc_entangle, redis_client, mahal_guard
 
     print("\n" + "="*55)
     print("QuCardio Backend v3.0 — Loading all models")
@@ -214,18 +226,71 @@ async def load_models():
         print("[1.5/6] ⚠️ ECG Gatekeeper not found — falling back to heuristic checks")
         print("        (searched: backend/models/ and project-root models/)")
 
+    # ── 1.6 Mahalanobis guard ─────────────────────────────────
+    _mahal_path = os.path.join(model_dir, 'mahalanobis_guard.npz')
+    if os.path.exists(_mahal_path):
+        print(f"[1.6] Loading Mahalanobis OOD guard ({_mahal_path}) ...")
+        mahal_guard = MahalanobisGuard.load(_mahal_path)
+        print(f"      Mahalanobis guard loaded ✅  threshold={mahal_guard.threshold:.4f}")
+    else:
+        print("[1.6] ⚠️ Mahalanobis guard not found — feature-space OOD check disabled")
+
     # ── 2. SVD + Scaler ──────────────────────────────────────
+    # SECURITY: joblib/pickle can execute arbitrary code when deserialising.
+    # Models come from the project's own backend/models/ directory, which is
+    # mounted read-only in Docker.  As an additional layer, reject pickle streams
+    # that reference unexpected top-level module prefixes before importing them.
+    def _check_pkl_safety(path: str) -> None:
+        """
+        Walk the pickle opcodes and reject any GLOBAL or STACK_GLOBAL instruction
+        that names a module outside of the known-safe prefixes.  Raises ValueError
+        if a suspicious entry is found so load_models() aborts with a clear error
+        instead of executing injected code.
+        """
+        import pickle as _pkl
+        import pickletools as _pt
+        import io as _io
+
+        safe_prefixes = (
+            "numpy", "sklearn", "builtins", "collections", "_codecs",
+            "copyreg", "abc", "_abc", "copy_reg",
+        )
+        with open(path, "rb") as _fh:
+            raw = _fh.read()
+        # joblib may gzip-compress the payload; try transparent decompression.
+        try:
+            import gzip
+            raw = gzip.decompress(raw)
+        except Exception:
+            pass
+        try:
+            ops = list(_pt.genops(_io.BytesIO(raw)))
+        except Exception:
+            return  # cannot parse — let joblib handle it normally
+        for opcode, arg, _ in ops:
+            if opcode.name in ("GLOBAL", "STACK_GLOBAL") and isinstance(arg, str):
+                module = arg.split(" ")[0].split(".")[0]
+                if not any(module.startswith(p) for p in safe_prefixes):
+                    raise ValueError(
+                        f"Refusing to load model file '{path}': "
+                        f"contains unexpected module reference '{arg}'."
+                    )
+
     print("[2/6] Loading SVD reducer + MinMax scaler...")
+    _check_pkl_safety(os.path.join(model_dir, 'svd_reducer.pkl'))
     svd_reducer   = joblib.load(os.path.join(model_dir, 'svd_reducer.pkl'))
+    _check_pkl_safety(os.path.join(model_dir, 'minmax_scaler.pkl'))
     minmax_scaler = joblib.load(os.path.join(model_dir, 'minmax_scaler.pkl'))
 
     # ── 3. Classical SVM ─────────────────────────────────────
     print("[3/6] Loading Classical SVM...")
+    _check_pkl_safety(os.path.join(model_dir, 'svm_model.pkl'))
     svm_model = joblib.load(os.path.join(model_dir, 'svm_model.pkl'))
     print(f"      SVM loaded ✅  (CalibratedClassifierCV, RBF C=10)")
 
     # ── 4. QSVC + meta ───────────────────────────────────────
     print("[4/6] Loading QSVC (tuned — 94.62%)...")
+    _check_pkl_safety(os.path.join(model_dir, 'qsvc_model.pkl'))
     qsvc_model = joblib.load(os.path.join(model_dir, 'qsvc_model.pkl'))
     # Load tuning meta (feature variant, reps, entanglement) saved by tune_qsvc.py
     meta_path = os.path.join(model_dir, 'qsvc_meta.json')
@@ -248,6 +313,7 @@ async def load_models():
     for c1, c2 in CLASS_PAIRS:
         path = os.path.join(model_dir, f'pegasos_{c1}_{c2}.pkl')
         if os.path.exists(path):
+            _check_pkl_safety(path)
             pegasos_models[(c1, c2)] = joblib.load(path)
             print(f"      pegasos_{c1}_{c2} ✅")
         else:
@@ -293,6 +359,25 @@ async def load_models():
     else:
         print(f"      ⚠️  features_9d.npz not found — Pegasos inference disabled")
 
+    # ── 7. JIT warmup — pre-compile Qiskit assign_parameters + Statevector ──
+    # The first call to Statevector(bound_circuit) triggers Qiskit's internal
+    # transpiler and numpy JIT, adding ~1–3 s of latency to the first real
+    # request.  Running one dummy computation here moves that cost to startup.
+    print("[Warmup] Pre-compiling Qiskit circuits…")
+    try:
+        _dummy = np.zeros(config.FEATURE_DIMENSION)
+        if feature_map_qsvc is not None:
+            from qiskit.quantum_info import Statevector as _SV
+            _b = feature_map_qsvc.assign_parameters(_dummy)
+            _ = _SV(_b).data
+        if feature_map_pegasos is not None:
+            from qiskit.quantum_info import Statevector as _SV
+            _b = feature_map_pegasos.assign_parameters(_dummy)
+            _ = _SV(_b).data
+        print("      Warmup done ✅")
+    except Exception as _we:
+        print(f"      Warmup skipped: {_we}")
+
     print("\n✅ All models ready!")
     print("="*55 + "\n")
 
@@ -300,6 +385,10 @@ async def load_models():
 # ─────────────────────────────────────────────────────────────────────────────
 # Quantum helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Shared thread pool for CPU-bound quantum circuit simulation.
+_QUANTUM_EXECUTOR = ThreadPoolExecutor(max_workers=4)
+
 
 def compute_single_statevector(x_9d, fmap):
     """Compute ZZFeatureMap statevector for one 9-D sample. Returns (512,) complex."""
@@ -316,6 +405,22 @@ def quantum_kernel_row(x_9d_single, sv_train_matrix, fmap):
     """
     sv_x = compute_single_statevector(x_9d_single, fmap)  # (512,)
     return (np.abs(sv_train_matrix.conj() @ sv_x) ** 2).real  # (N,)
+
+
+async def quantum_kernel_row_async(x_9d_single, sv_train_matrix, fmap):
+    """
+    Async wrapper: runs quantum_kernel_row in the thread pool so it does not
+    block the FastAPI event loop, allowing other requests to be served while
+    the CPU-bound statevector simulation runs.
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        _QUANTUM_EXECUTOR,
+        quantum_kernel_row,
+        x_9d_single,
+        sv_train_matrix,
+        fmap,
+    )
 
 
 def pegasos_predict_node(k_row_full, c1, c2):
@@ -590,6 +695,7 @@ def is_valid_ecg_image(img_gray: np.ndarray, img_bgr: np.ndarray | None = None) 
 @app.post("/predict")
 async def predict_ecg(
     model: str = "classical",
+    encoding_range: str = "minmax_0pi",
     file: UploadFile = File(...),
     skip_gatekeeper: bool = False,
 ):
@@ -683,6 +789,8 @@ async def predict_ecg(
                 is_ecg, reason = is_valid_ecg_image(img_gray, img_bgr=img_color)
                 if not is_ecg:
                     raise HTTPException(status_code=422, detail=f"Not an ECG image. {reason}")
+
+            # Periodicity + axis-angle checks deferred to Step 1.5 (after preprocessing).
         else:
             print(f"  [predict] ⚠️  skip_gatekeeper=True — ECG validation bypassed (OOD/research mode)")
 
@@ -695,6 +803,31 @@ async def predict_ecg(
         # evaluation scripts (ST-5B, 5C, 5D, 5E).
         t_pre = time.perf_counter()
         img_for_resnet = preprocess_for_inference(img_bgr)  # float32 [0–255] (340,340)
+
+        # ── Step 1.5: Periodicity + axis-angle check on preprocessed image ──────
+        # Calibrated on all 928 processed 340×340 crops (grid removed):
+        #   periodicity min=0.1446, line-art max=0.063 → threshold 0.14 (zero ECG FP)
+        #   axis_frac   max=0.4149, line-art min=0.434 → threshold 0.42 (zero ECG FP)
+        # Must run AFTER preprocessing because raw ECG grid paper scores 0.45–0.55
+        # on axis_angle_fraction, well above the 0.42 threshold.
+        if not skip_gatekeeper:
+            _proc_gray = img_for_resnet.astype(np.uint8)  # (340,340) uint8 for cv2 ops
+            _per_score, _ = ecg_periodicity_score(_proc_gray)
+            _axis_frac    = axis_angle_fraction(_proc_gray)
+            if _per_score < 0.14:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Image rejected: no repeating beat structure detected "
+                           f"(periodicity score {_per_score:.3f} < 0.14). "
+                           f"Verify the image is a standard printed ECG strip."
+                )
+            if _axis_frac > 0.42:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Image rejected: gradient energy is predominantly "
+                           f"axis-aligned ({_axis_frac:.2f} > 0.42), consistent "
+                           f"with a diagram or line chart rather than an ECG waveform."
+                )
 
         display_uint8 = img_for_resnet.astype(np.uint8)
         _, buf = cv2.imencode('.png', display_uint8)
@@ -722,9 +855,23 @@ async def predict_ecg(
         scaled  = minmax_scaler.transform(reduced)                 # (1, 9) in [0,1]
         t_svd_ms = (time.perf_counter() - t_svd) * 1000
 
+        # ── Step 3.5: Mahalanobis OOD guard ──────────────────────────────────
+        # Checks whether the compressed feature vector lies within the training
+        # distribution. A distance above the p99 threshold flags the sample as
+        # out-of-distribution; classification still proceeds but the flag is
+        # returned in the response so the caller can choose how to surface it.
+        ood_flag = False
+        ood_distance = None
+        if mahal_guard is not None:
+            ood_distance = float(mahal_guard.distance(scaled[0]))
+            ood_flag = ood_distance > mahal_guard.threshold
+            if ood_flag:
+                print(f"  [predict] ⚠️  Mahalanobis OOD flag: d={ood_distance:.3f} > threshold={mahal_guard.threshold:.3f}")
+
         # ── Step 4: Classification ────────────────────────────────────────────
         t_clf = time.perf_counter()
 
+        k_row = None
         if model_key == 'quantum':
             # ── QSVC: apply feature transform → compute kernel row → SVC.predict ──
             if qsvc_model is None:
@@ -733,19 +880,18 @@ async def predict_ecg(
                 raise HTTPException(status_code=503,
                     detail="Training statevectors (sv_train_qsvc.npz) not found.")
 
-            # Apply the same feature transform used during QSVC training
-            # Best config: minmax_0pi → multiply MinMax-scaled [0,1] features by π
-            # This maps feature values to rotation angles [0, π] — optimal for ZZFeatureMap
-            if qsvc_feat_variant == "minmax_0pi":
+            feat_var = encoding_range if encoding_range in ["minmax_0pi", "minmax_01"] else qsvc_feat_variant
+            if feat_var == "minmax_0pi":
                 x_qsvc = scaled[0] * np.pi
-            elif qsvc_feat_variant == "l2_norm":
+            elif feat_var == "l2_norm":
                 from sklearn.preprocessing import normalize as _norm
                 x_qsvc = _norm(scaled, norm="l2")[0]
             else:  # minmax_01 — use as-is
                 x_qsvc = scaled[0]
 
             # K_test_row shape: (1, N_train) — compare one test sample vs all train
-            k_row     = quantum_kernel_row(x_qsvc, sv_train_qsvc, feature_map_qsvc)  # (N_train,)
+            # Run in thread pool so the event loop stays responsive during CPU-bound sim
+            k_row     = await quantum_kernel_row_async(x_qsvc, sv_train_qsvc, feature_map_qsvc)  # (N_train,)
             K_row_2d  = k_row.reshape(1, -1).astype(np.float32)    # (1, N_train)
             prediction_idx = int(qsvc_model.predict(K_row_2d)[0])
 
@@ -770,7 +916,7 @@ async def predict_ecg(
                 raise HTTPException(status_code=503,
                     detail="Training statevectors (sv_train_pegasos.npz) not found.")
 
-            k_row          = quantum_kernel_row(scaled[0], sv_train_pegasos, feature_map_pegasos)  # (N_train,)
+            k_row          = await quantum_kernel_row_async(scaled[0], sv_train_pegasos, feature_map_pegasos)  # (N_train,)
             prediction_idx = int(pegasos_multiclass_predict(k_row))
 
             # Pegasos has no probability output — aggregate decision scores from the
@@ -809,15 +955,19 @@ async def predict_ecg(
         elif confidence >= 0.55: confidence_level = "medium"
         else:                    confidence_level = "low"
         
-        # Log prediction to audit database
-        log_id = db.log_prediction(
-            patient_id=getattr(file, "filename", "unknown"),
-            image_hash=img_hash,
-            model_used=MODEL_LABELS.get(model_key, model_key),
-            predicted_class=predicted_class,
-            confidence=confidence,
-            probabilities=prob_dict
-        )
+        # Log prediction to audit database — failure must never abort a prediction
+        log_id = None
+        try:
+            log_id = db.log_prediction(
+                patient_id=getattr(file, "filename", "unknown"),
+                image_hash=img_hash,
+                model_used=MODEL_LABELS.get(model_key, model_key),
+                predicted_class=predicted_class,
+                confidence=confidence,
+                probabilities=prob_dict
+            )
+        except Exception as _db_err:
+            print(f"  [predict] WARNING: audit log write failed: {_db_err}")
 
         # Debug print so terminal shows what's happening
         print(f"  [predict] model={model_key}  →  {predicted_class}  "
@@ -832,6 +982,8 @@ async def predict_ecg(
             "model_used":         MODEL_LABELS.get(model_key, model_key),
             "preprocessed_image": f"data:image/png;base64,{preprocessed_b64}",
             "svd_features":       scaled[0].tolist(),
+            "ood_flag":           ood_flag,
+            "ood_distance":       round(ood_distance, 4) if ood_distance is not None else None,
             "processing_time": {
                 "preprocessing_ms":      round(t_pre_ms,  1),
                 "feature_extraction_ms": round(t_feat_ms, 1),
@@ -839,6 +991,7 @@ async def predict_ecg(
                 "classification_ms":     round(t_clf_ms,  1),
                 "total_ms":              round(total_ms,  1),
             },
+            "kernel_row":         k_row.tolist() if k_row is not None else None,
             "cache_hit": False,
         }
 
@@ -900,6 +1053,12 @@ async def predict_pdf(
     """
     Generate a 1-page PDF clinical report for a single ECG.
     The temporary PDF is deleted from disk after the response is sent.
+
+    BUG FIX: background_tasks.add_task(os.remove, pdf_path) was scheduled
+    BEFORE returning FileResponse, which meant the delete task could fire
+    before the response body was fully streamed to the client (race condition).
+    Fix: pass background_tasks into FileResponse so FastAPI deletes the file
+    only after the response is completely sent.
     """
     try:
         result = await predict_ecg(model=model, file=file)
@@ -914,12 +1073,13 @@ async def predict_pdf(
         }
 
         pdf_path = generate_pdf_report(result, filename=file.filename or "report")
-        # Schedule cleanup so /tmp/qucardio_reports doesn't fill the disk
-        background_tasks.add_task(os.remove, pdf_path)
+        # FileResponse.background runs AFTER the response body is fully sent,
+        # preventing the race condition where the file was deleted mid-transfer.
         return FileResponse(
             path=pdf_path,
             media_type="application/pdf",
-            filename=f"QuCardio_Report_{file.filename}.pdf"
+            filename=f"QuCardio_Report_{file.filename}.pdf",
+            background=background_tasks,
         )
     except HTTPException:
         raise
@@ -932,10 +1092,11 @@ async def predict_pdf(
 @app.post("/predict/all")
 async def predict_all(file: UploadFile = File(...)):
     """
-    Runs inference on all 3 models sequentially and returns comparative results.
+    Runs inference on all 3 models concurrently and returns comparative results.
     The file is read ONCE into bytes, then a fresh UploadFile is created for
-    each model call — prevents the stream-exhausted / empty-buf crash on the
-    2nd and 3rd calls.
+    each model call — prevents the stream-exhausted / empty-buf crash.
+    All three models run in parallel via asyncio.gather so total time ≈ slowest
+    model rather than the sum of all three.
     """
     try:
         # Read the raw bytes exactly once so the stream is not re-used
@@ -949,13 +1110,22 @@ async def predict_all(file: UploadFile = File(...)):
             uf = UploadFile(filename=filename, file=spooled)  # type: ignore[call-arg]
             return uf
 
-        results = []
-        for model_key in ("classical", "pegasos", "quantum"):
-            fresh_file = _make_upload(raw, file.filename or "ecg.png")
-            res = await predict_ecg(model=model_key, file=fresh_file)
-            results.append({"model": model_key, "data": res})
+        fname = file.filename or "ecg.png"
 
-        return {"all_results": results}
+        async def _run(model_key: str):
+            fresh_file = _make_upload(raw, fname)
+            res = await predict_ecg(model=model_key, file=fresh_file)
+            return {"model": model_key, "data": res}
+
+        # Run all three models in parallel — quantum kernel runs in thread pool so
+        # it won't block classical/pegasos from starting concurrently.
+        results = await asyncio.gather(
+            _run("classical"),
+            _run("pegasos"),
+            _run("quantum"),
+        )
+
+        return {"all_results": list(results)}
     except HTTPException:
         raise
     except Exception as e:
@@ -1021,7 +1191,7 @@ async def predict_gradcam(model: str = "classical", file: UploadFile = File(...)
 
             if model_key == 'quantum' and qsvc_model is not None and sv_train_qsvc is not None:
                 x_enc = scaled[0] * np.pi
-                k_row = quantum_kernel_row(x_enc, sv_train_qsvc, feature_map_qsvc)
+                k_row = await quantum_kernel_row_async(x_enc, sv_train_qsvc, feature_map_qsvc)
                 pred_idx = int(qsvc_model.predict(k_row.reshape(1, -1))[0])
             elif model_key == 'pegasos' and pegasos_models:
                 pred_idx = 0  # fallback — pegasos is complex OvO, use class 0 as target
@@ -1087,3 +1257,126 @@ async def predict_gradcam(model: str = "classical", file: UploadFile = File(...)
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Allowed encoding ranges for the /circuit endpoint
+_VALID_ENCODING_RANGES = {"minmax_0pi", "minmax_01", "l2_norm"}
+
+@app.get("/circuit")
+async def get_circuit(
+    features: str,
+    encoding_range: str = "minmax_0pi"
+):
+    from fastapi.responses import StreamingResponse
+    import io
+
+    if feature_map_qsvc is None:
+        raise HTTPException(status_code=503, detail="Quantum feature map not loaded")
+
+    # SECURITY: validate encoding_range against allowlist before using it
+    if encoding_range not in _VALID_ENCODING_RANGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid encoding_range '{encoding_range}'. "
+                   f"Allowed: {sorted(_VALID_ENCODING_RANGES)}"
+        )
+
+    try:
+        # SECURITY: parse each token individually and reject non-finite values
+        # (prevents NaN/Inf injection that could crash the Qiskit circuit)
+        raw_tokens = features.split(",")
+        if len(raw_tokens) != 9:
+            raise ValueError("Expected exactly 9 comma-separated features")
+        parsed = [float(t) for t in raw_tokens]
+        if not all(np.isfinite(v) for v in parsed):
+            raise ValueError("Feature values must be finite numbers (no NaN/Inf)")
+        x_scaled = np.array(parsed)
+            
+        if encoding_range == "minmax_0pi":
+            x_enc = x_scaled * np.pi
+        elif encoding_range == "l2_norm":
+            from sklearn.preprocessing import normalize
+            x_enc = normalize(x_scaled.reshape(1, -1), norm="l2")[0]
+        else:
+            x_enc = x_scaled
+            
+        bound_circuit = feature_map_qsvc.assign_parameters(x_enc)
+        
+        # We need matplotlib installed (which it is, since it's a QML project plotting things)
+        fig = bound_circuit.draw('mpl') 
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', bbox_inches='tight', transparent=True)
+        buf.seek(0)
+        
+        return StreamingResponse(buf, media_type="image/png")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# SECURITY: simple API-key guard for the history export endpoint.
+# Set EXPORT_API_KEY in the environment.  If unset, export is disabled entirely
+# so a misconfigured deployment cannot accidentally expose patient audit data.
+_EXPORT_API_KEY = os.environ.get("EXPORT_API_KEY", "")
+
+from fastapi import Header
+
+@app.get("/history/export")
+async def export_history(x_api_key: str = Header(default="")):
+    """
+    Export the full audit log as CSV.
+
+    SECURITY: requires the X-Api-Key header to match the EXPORT_API_KEY
+    environment variable.  Set EXPORT_API_KEY to a strong random secret
+    before deploying.  Leaving it empty disables the endpoint entirely.
+    """
+    import sqlite3
+    import csv
+    import io
+    from fastapi.responses import StreamingResponse
+
+    if not _EXPORT_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="History export is disabled. Set EXPORT_API_KEY in the environment to enable it."
+        )
+    if x_api_key != _EXPORT_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Api-Key header.")
+
+    try:
+        conn = sqlite3.connect(db.DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM audit_log ORDER BY timestamp DESC")
+        rows = cursor.fetchall()
+        cols = [description[0] for description in cursor.description]
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(cols)
+        writer.writerows(rows)
+
+        output.seek(0)
+        response = StreamingResponse(iter([output.getvalue()]), media_type="text/csv")
+        response.headers["Content-Disposition"] = "attachment; filename=qucardio_audit_log.csv"
+        return response
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
+@app.get("/ablation_data")
+async def get_ablation_data():
+    # Resolve project root from __file__ (/app/backend/main.py → /app)
+    _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(_project_root, "results", "paper", "ablation", "kta_all_configs.json")
+    if not os.path.exists(path):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Ablation data not found (looked in: {path})"
+        )
+    with open(path, "r") as f:
+        return json.load(f)
+

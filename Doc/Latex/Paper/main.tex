@@ -1,0 +1,1002 @@
+\documentclass[10pt,conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{algorithm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{url}
+\usepackage{cite}
+\usepackage{xcolor}
+\usepackage{tabularx}
+\usepackage{array}
+
+% Prevent overfull hboxes
+\tolerance=1000
+\emergencystretch=2em
+\hfuzz=2pt
+\sloppy
+
+\begin{document}
+
+\title{Quantum Kernel Circuit Design for Four-Class ECG Image
+Classification: Encoding Range, Entanglement Topology,
+and Statistical Validation}
+
+\author{%
+\IEEEauthorblockN{(Author 1 Name), (Author 2 Name), (Author 3 Name), (Author 4 Name)}
+\IEEEauthorblockA{\textit{Dept.\ of Computer Science and Engineering}\\
+St.\ Joseph Engineering College, Mangaluru, India\\
+\{email1, email2, email3, email4\}@sjec.ac.in}
+\and
+\IEEEauthorblockN{(Guide Name)}
+\IEEEauthorblockA{\textit{Dept.\ of Computer Science and Engineering}\\
+St.\ Joseph Engineering College, Mangaluru, India}
+}
+
+\maketitle
+
+\begin{abstract}
+Quantum machine learning has been applied to automated ECG analysis, but
+prior studies frequently report isolated accuracy figures without
+parametric ablation, statistical validation, or confidence calibration.
+This paper presents a hybrid classical-quantum pipeline for four-class
+ECG image classification and systematically ablates five quantum circuit
+variables. Features are extracted from a frozen ResNet50, compressed to
+nine dimensions via TruncatedSVD, and classified with a nine-qubit
+ZZFeatureMap fidelity kernel. On a 928-image clinical dataset, the
+tuned Quantum Support Vector Classifier reaches 94.62\% accuracy. A
+$2\!\times\!2$ factorial ablation shows that expanding the feature
+encoding range to $[0,\pi]$ and closing the qubit chain into a circular
+topology each improve accuracy, yielding a joint 4.84 percentage-point
+gain over the $[0,1]$ linear baseline. The quantum kernel achieves a
+significant margin over a classical SVM ($\chi^{2}=10.32$, $p=0.0013$),
+though its 2.68-point margin over Random Forest is not statistically
+significant. The classifier attains complete Myocardial Infarction
+separation (AUC\,=\,1.000), Expected Calibration Error below 0.07, and
+retains 86.7\% accuracy under brightness perturbation where the
+classical SVM falls to 46.7\%. Zero-shot transfer to a second scanner
+domain reverses the ordering, indicating that generalisation is
+currently bounded by classical feature extraction. The pipeline is
+deployed as an end-to-end clinical screening web application.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Quantum machine learning, quantum kernel methods, ZZFeatureMap, ECG
+classification, circuit ablation, statistical validation.
+\end{IEEEkeywords}
+
+%-----------------------------------------------------------------------
+\section{Introduction}
+%-----------------------------------------------------------------------
+
+Cardiovascular diseases are the leading cause of death worldwide,
+responsible for approximately 17.9~million deaths annually according to
+World Health Organization estimates~\cite{who2021}. The term covers
+conditions including myocardial infarction, arrhythmia, coronary artery
+disease and stroke. The Electrocardiogram (ECG) remains the standard
+first-line, non-invasive tool for detecting these conditions. Specialist
+interpretation of ECG traces is frequently unavailable in high-volume
+hospitals and rural clinics, which gives an automated classification
+system real clinical value.
+
+Machine learning applied to ECG classification has progressed
+considerably over the past decade, moving from hand-crafted signal
+features toward representations learned directly by deep networks.
+Progress specifically on ECG \emph{image} classification has been
+slower, because clinical image datasets remain small and multi-class,
+and non-linear correlations between waveform regions are difficult for
+a compact classical feature space to separate cleanly.
+
+Quantum machine learning offers one route around that limitation. A
+quantum feature map encodes classical data into the state of a
+multi-qubit system occupying a Hilbert space whose dimension grows
+exponentially with qubit count, giving the resulting quantum kernel
+access to a far richer set of non-linear decision boundaries.
+Present-day hardware remains in the Noisy Intermediate-Scale Quantum
+(NISQ) era, so near-term research of this kind is evaluated on
+classical simulators rather than physical devices, as is the case
+throughout this study.
+
+Prior work applying quantum machine learning to ECG classification has
+established that the approach is workable, but it has generally done so
+by reporting a single accuracy figure under one fixed circuit
+configuration, with an unexamined encoding range, no statistical
+validation of the reported margin and no calibration analysis. This
+paper addresses that gap directly. The classical portion of the pipeline
+is held constant while five circuit design variables are systematically
+varied: encoding range, entanglement topology, Pauli operator structure,
+circuit repetition depth and the number of retained classical features.
+
+The main contributions of this study are as follows.
+\begin{enumerate}
+  \item \textbf{Controlled $2\!\times\!2$ factorial circuit ablation.}
+    Scaling features to $[0,\pi]$ and closing the entanglement chain into
+    a ring each raise accuracy at both levels of the other factor; their
+    joint effect is sub-additive by 4.84 against 5.92 percentage points.
+    The result is consistent with full $2\pi$ phase coverage and ring
+    connectivity acting on an overlapping set of misclassified samples.
+  \item \textbf{Statistical validation against classical baselines.}
+    McNemar's test is applied to every pairwise model comparison,
+    including the strongest classical baseline. To the best of our
+    knowledge this is the first significance test of quantum kernel
+    advantage reported for ECG image classification.
+  \item \textbf{Calibration and perturbation robustness.} Expected
+    Calibration Error below 0.07 for all three deployed models, and a
+    nine-condition perturbation study in which phase encoding retains
+    86.7\% under brightness distortion against 46.7\% for the classical
+    SVM.
+  \item \textbf{Domain boundary.} A zero-shot cross-scanner evaluation
+    identifies feature-extractor domain adaptation as the blocking step
+    for deployment beyond the training scanner.
+  \item \textbf{Deployed system.} A web application with automated input
+    gatekeeping, three-model consensus comparison and PDF report
+    generation, together with the code and scripts that reproduce every
+    table and figure.
+\end{enumerate}
+
+%-----------------------------------------------------------------------
+\section{Related Work}
+%-----------------------------------------------------------------------
+
+\subsection{Classical ECG Classification}
+
+Yildirim et al.~\cite{yildirim2018} showed that a one-dimensional CNN
+applied directly to raw ECG waveforms achieves 91.33\% accuracy across
+17 arrhythmia classes from the MIT-BIH database. Vasquez-Iturralde
+et al.~\cite{vasquez2024} reviewed 494 deep learning ECG publications
+and identified the scarcity of studies operating on image-format ECG
+inputs and the near-absence of confidence calibration reporting as
+persistent gaps. Working directly with image-format ECGs is distinctly
+more challenging: the lack of a digital waveform precludes standard
+frequency-domain techniques, requiring classifiers to handle
+binarisation artefacts, grid lines and scan-quality variations.
+Prabhu et al.~\cite{prabhu2023} report a classical ResNet50--SVM
+baseline reaching 83.33\% on the same four-class clinical dataset used
+here. The present work provides both calibration and statistical
+significance analyses, directly addressing the gaps identified in the
+broader literature.
+
+\subsection{Theoretical Foundations of Quantum Kernel Methods}
+
+The theoretical basis for quantum kernel classification was established
+by Havlicek et al.~\cite{havlicek2019}, who constructed
+ZZFeatureMap-based kernels that map data into exponentially large
+Hilbert spaces through Pauli-ZZ interactions. Huang et al.~\cite{huang2021}
+showed that once training data is available a classical model can often
+match a quantum model, and proposed a geometric criterion for judging
+whether a quantum advantage is plausible for a given dataset. Biamonte
+et al.~\cite{biamonte2017} identified hybrid classical-quantum pipelines
+as the most practical near-term architecture, directly motivating the
+Truncated SVD stage described in Section~\ref{sec:method}.
+
+\subsection{Quantum Machine Learning for Cardiac and ECG Classification}
+
+Prabhu et al.~\cite{prabhu2023} demonstrated quantum ECG classification
+on the same four-class clinical data used here, combining ResNet50
+\texttt{pool1\_pool} features with Truncated SVD at nine components and
+a ZZFeatureMap QSVC under $[0,1]$ feature scaling, reporting 94.09\%
+for the QSVC. The paper does not state the entanglement topology;
+Qiskit's ZZFeatureMap default is full entanglement, so the configuration
+used was almost certainly $[0,1]$\,+\,full. Re-running that
+configuration on the present pipeline gives 93.01\%, reducing the
+reproduction gap to 1.08 points attributable to split and seed
+differences. Neither the encoding range nor the entanglement topology
+was varied, and no statistical validation, calibration analysis or
+deployment was described. The present work retains that architecture and
+adds the circuit design study.
+
+Jain et al.~\cite{jain2025} applied ResNet50 with PCA at eight
+components and an eight-qubit ZZFeatureMap QSVC to two ECG image
+datasets, reporting that the QSVC outperformed a classical SVM by
+roughly eight percentage points, with significance assessed by a
+non-parametric rank test. Their second dataset is the one used here for
+the cross-dataset transfer study in Section~\ref{sec:transfer}. Neither
+the encoding range nor the entanglement topology was varied.
+Ramkhelawan et al.~\cite{ramkhelawan2025} combined ResNet50 with a
+ten-qubit variational quantum circuit for binary arrhythmia detection,
+reporting 99.98\% accuracy on 123,998 images; the binary setup is
+structurally simpler and the dataset is two orders of magnitude larger.
+Ozpolat and Karabatak~\cite{ozpolat2023} found that accuracy does not
+increase monotonically with qubit count, consistent with the
+circuit-repetition ablation in Section~\ref{sec:ablation}. Aksoy and
+Ozpolat~\cite{aksoy2025} adopted $[0,\pi]$ scaling independently on
+tabular medical data, supporting reading the $[0,\pi]$ result as a
+property of the ZZFeatureMap rotation structure rather than a
+dataset-specific artefact. Soon et al.~\cite{soon2026} proposed a
+hierarchical quantum ensemble reaching 97\% on tabular cardiovascular
+data; the architecture does not involve ECG images and does not ablate
+circuit design. Setiawan et al.~\cite{setiawan2026} reviewed 94
+quantum machine learning healthcare studies and identified calibration
+analysis and statistical significance testing as almost entirely absent
+from the literature.
+
+\subsection{Summary and Positioning}
+
+Table~\ref{tab:related} positions the present work against prior
+quantum ECG and cardiac studies. Among all works surveyed, none combines
+a systematic circuit design ablation, a significance test, a calibration
+analysis and a deployed interface on an ECG image classification task.
+
+\begin{table}[t]
+\caption{Comparison with Prior Quantum ECG and Cardiac Works}
+\label{tab:related}
+\centering
+\renewcommand{\arraystretch}{1.1}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+Reference & Task & Best Acc. & Ablation & Stat. & Calib. & Depl.\\
+\midrule
+Yildirim et al.~\cite{yildirim2018} & Arr.\ sig. & 91.33\% & No & No & No & No\\
+Havlicek et al.~\cite{havlicek2019} & Synthetic & N/A & No & No & No & No\\
+Huang et al.~\cite{huang2021} & Geom.\ anal. & N/A & No & No & No & No\\
+Prabhu et al.~\cite{prabhu2023} & 4-cls ECG & 94.09\% & No & No & No & No\\
+Jain et al.~\cite{jain2025} & ECG img. & ---$^{\dagger}$ & No & Rank & No & No\\
+Ramkhelawan et al.~\cite{ramkhelawan2025} & Bin.\ arr. & 99.98\% & No & No & No & No\\
+Ozpolat \& Kar.~\cite{ozpolat2023} & Arrhythmia & 80.90\% & Qubit & No & No & No\\
+Aksoy \& Ozpolat~\cite{aksoy2025} & Med.\ tab. & QSVM best & No & No & No & No\\
+Soon et al.~\cite{soon2026} & Tab.\ CVD & 97.00\% & No & No & No & No\\
+Setiawan et al.~\cite{setiawan2026} & QML rev. & N/A & N/A & N/A & N/A & N/A\\
+\textbf{This work} & \textbf{4-cls ECG} & \textbf{94.62\%} & \textbf{320 cfg} & \textbf{McNemar} & \textbf{ECE$<$0.07} & \textbf{Yes}\\
+\bottomrule
+\end{tabular}}
+\smallskip
+
+\begin{flushleft}
+{\footnotesize $^{\dagger}$Results reported across two datasets with
+different splits; no single comparable figure available.}
+\end{flushleft}
+\end{table}
+
+%-----------------------------------------------------------------------
+\section{Proposed Methodology}
+\label{sec:method}
+%-----------------------------------------------------------------------
+
+The proposed system is divided into two sequential stages: a Gating
+Layer that filters and validates incoming uploads, and a Classification
+Engine that extracts features and computes the diagnostic prediction.
+Fig.~\ref{fig:pipeline} shows the complete inference data flow. During
+development, an offline training phase fits the feature reducers and
+trains the classifiers on 928 images, serialising the resulting models
+to disk. At inference time, those objects are loaded to evaluate single
+uploads without retraining.
+
+\begin{figure}[t]
+  \centering
+  \fbox{\parbox{0.9\columnwidth}{\centering\vspace{1.5cm}%
+    [Pipeline block diagram -- draw.io figure to be inserted here]%
+    \vspace{1.5cm}}}
+  \caption{System pipeline. The Gating Layer (left) applies three
+    sequential validation stages before the Classification Engine
+    (right) extracts ResNet50 features, compresses them to 9-D via
+    TruncatedSVD, and classifies with three parallel models. Quantum
+    branches scale features to $[0,\pi]$ before ZZFeatureMap encoding;
+    the classical SVM uses $[0,1]$ features directly.}
+  \label{fig:pipeline}
+\end{figure}
+
+\subsection{ECG Image Preprocessing}
+
+A seven-step OpenCV pipeline converts each image to a
+$340\!\times\!340$ pixel normalised greyscale array. The image is first
+converted to greyscale and binarised with Otsu adaptive thresholding.
+Morphological dilation with a $15\!\times\!5$ kernel joins fragmented
+trace segments, after which the largest contour is detected and the
+image is cropped to its bounding box with 15 pixels of padding. A
+second Otsu threshold with conditional inversion produces a consistent
+trace-on-background polarity across all scan types. Vertical grid lines
+are removed with a $1\!\times\!40$ morphological opening and horizontal
+grid lines with a $40\!\times\!1$ kernel; the ECG trace is thicker than
+any grid line along both axes and therefore survives both subtractions
+intact. A $3\!\times\!3$ Gaussian blur and a re-threshold at pixel
+value~30 suppress residual speckle, after which the image is resized to
+$340\!\times\!340$ using \texttt{cv2.INTER\_AREA} and divided by~255.0
+to yield a float32 array in $[0,1]$.
+
+\subsection{ResNet50 Feature Extraction}
+
+Feature extraction uses a ResNet50~\cite{he2016} with frozen ImageNet
+weights, rebuilt through the Keras functional API to output at the
+\texttt{pool1\_pool} layer. That layer applies $3\!\times\!3$
+max-pooling over the initial $7\!\times\!7$ convolutional stage (64
+filters, stride~2), producing an $85\!\times\!85\!\times\!64$ spatial
+activation map, which is 462,400 dimensions when flattened. The shallow
+layer captures low-level morphological structure such as QRS complex
+geometry, ST segment curvature and P and T wave shape, without the
+high-level ImageNet object semantics encoded at deeper layers. The
+choice of extraction layer follows Prabhu et al.~\cite{prabhu2023}.
+Greyscale inputs are expanded to three channels by axis repetition
+before ResNet50's per-channel normalisation. Extraction ran in batches
+of eight.
+
+\subsection{Dimensionality Reduction}
+
+TruncatedSVD at \texttt{n\_components}\,$=$\,9, fitted on the 742
+training samples, compresses the 462,400-dimensional vectors to nine
+dimensions. TruncatedSVD is used in preference to PCA because it does
+not require mean-centering of the data matrix, which is expensive at
+this dimensionality and destroys the sparsity of the activation map;
+the retained components span directions of largest second moment rather
+than of largest variance. The choice of nine components follows Prabhu
+et al.~\cite{prabhu2023} and is confirmed by the ablation in
+Section~\ref{sec:svd-reps}. A MinMaxScaler, also fitted on the training
+data alone, normalises the nine-dimensional vectors to $[0,1]$. For the
+quantum classifiers the scaled vector is then multiplied by $\pi$ before
+encoding, placing features in $[0,\pi]$; the classical SVM receives the
+$[0,1]$ vector directly. Both fitted objects are serialised at training
+time and loaded once at API startup.
+
+\subsection{Classical Support Vector Machine}
+
+The classical SVM uses \texttt{sklearn.svm.SVC}~\cite{sklearn} with an
+RBF kernel, $C\!=\!10$, \texttt{gamma}\,$=$\,\texttt{`scale'} and
+\texttt{class\_weight}\,$=$\,\texttt{`balanced'}. A
+\texttt{CalibratedClassifierCV} wrapper with
+\texttt{method}\,$=$\,\texttt{`isotonic'} and \texttt{cv}\,$=$\,3
+produces calibrated class probabilities. Hyperparameters were selected
+by five-fold stratified GridSearchCV maximising macro F1 over
+$C\in\{0.01,0.1,1.0,5.0,10.0\}$ and
+$\texttt{gamma}\in\{\texttt{`scale'},\texttt{`auto'}\}$. The selected
+$C$ lies at the upper edge of the grid, indicating the search was
+bounded from above by the grid rather than by the data.
+
+\subsection{Quantum Support Vector Classifier}
+
+The QSVC encodes the nine-dimensional vector into a
+$2^9\!=\!512$-dimensional complex Hilbert space using Qiskit's
+ZZFeatureMap~\cite{havlicek2019}, the Pauli-ZZ construction of
+Havlicek~et~al. Each repetition applies a Hadamard layer across all nine
+qubits, a first-order phase gate $P(2x_i)$ on qubit~$i$, and a
+second-order block
+$\mathrm{CNOT}$--$P\!\left(2(\pi-x_i)(\pi-x_j)\right)$--$\mathrm{CNOT}$
+on each connected qubit pair under the selected topology. The fidelity
+quantum kernel is
+\begin{equation}
+K(\mathbf{x},\mathbf{z}) = |\langle\psi(\mathbf{x})|\psi(\mathbf{z})\rangle|^2
+\label{eq:kernel}
+\end{equation}
+where $|\psi(\mathbf{x})\rangle$ is the statevector produced by
+encoding input~$\mathbf{x}$. Rather than running $N^2$ circuit
+evaluations, all $N\!=\!742$ training statevectors are precomputed once
+and the kernel matrix is assembled as
+\begin{equation}
+K[i,j] = |\mathbf{sv}_i \cdot \overline{\mathbf{sv}_j}|^2
+\label{eq:kmatrix}
+\end{equation}
+where $\mathbf{sv}_i$ is the 512-dimensional complex amplitude vector
+for sample~$i$. Full matrix construction for 742 samples takes under
+15~seconds on CPU, against over 30~minutes for direct circuit
+evaluation. A grid search over four encoding ranges, five entanglement
+topologies, $\texttt{reps}\in\{1,2,3,4\}$ and
+$C\in\{0.1,1.0,5.0,10.0\}$ (320 configurations) identified $[0,\pi]$
+encoding, circular entanglement, $\texttt{reps}\!=\!2$ and $C\!=\!5.0$
+as the optimal setting.
+
+\subsection{Multiclass Pegasos QSVC}
+
+Six one-versus-one binary Pegasos QSVC models~\cite{pegasos} cover all
+four class pairs. The native Qiskit PegasosQSVC does not converge at
+nine qubits: the average kernel value at this scale is approximately
+$1/512$, so the accumulated decision function remains numerically close
+to zero over the default iteration budget. A custom training loop
+precomputes all statevectors and evaluates each gradient step through
+matrix multiplication, and a per-model grid search over the
+regularisation constant and the iteration count recovers accuracy from
+78.49\% to 91.94\%.
+
+\subsection{Gating Layer and Web Application}
+
+The Gating Layer protects the classification pipeline using three
+sequential guards. Gate~1 is a MobileNetV2~\cite{sandler2018} model
+that hard-rejects non-ECG uploads (HTTP~422). Gate~2 is a Periodicity
+Filter that computes the autocorrelation of per-column dark pixel
+density, rejecting images with a peak autocorrelation below~0.15 or an
+axis-angle gradient fraction above~0.70 (HTTP~422). Gate~3 is a
+Mahalanobis distance guard applied after SVD compression; it compares
+the 9-D feature vector against the training distribution and appends a
+non-blocking out-of-distribution flag to the response if the distance
+exceeds the 99th-percentile threshold of~4.59.
+
+The FastAPI backend exposes six REST endpoints. A Redis cache keyed by
+the SHA-256 hash of the image bytes together with the model identifier
+returns stored results for repeated submissions with a 24-hour
+time-to-live. The React frontend provides tabs for Diagnosis, Batch
+Upload, Model Performance, Quantum Insights, API documentation and
+prediction history, with colour-coded severity indicators and calibrated
+confidence bars. Measured end-to-end QSVC latency is 893.9~ms
+(preprocessing 126.9~ms, ResNet50 627.6~ms, SVD 52.0~ms,
+classification 87.4~ms).
+
+%-----------------------------------------------------------------------
+\section{Experimental Setup}
+%-----------------------------------------------------------------------
+
+The experiments use the ECG image collection released on Mendeley Data
+by Khan et al.~\cite{khan2021}, collected at the Ch.\ Pervaiz Elahi
+Institute of Cardiology, Multan, Pakistan. The standard four-class
+subset comprises 929~images (Normal~284, Arrhythmia~233, Myocardial
+Infarction~240, History of MI~172), consistent with~\cite{prabhu2023}.
+One Myocardial Infarction scan could not be decoded and was excluded,
+leaving 928~images. Table~\ref{tab:dataset} shows the class
+distribution and the stratified 80:20 split applied with
+\texttt{random\_state}\,$=$\,42. No augmentation was applied during
+training; augmented images appear only in the robustness evaluation of
+Section~\ref{sec:robust}.
+
+\begin{table}[t]
+\caption{Dataset Class Distribution and Train/Test Split}
+\label{tab:dataset}
+\centering
+\renewcommand{\arraystretch}{1.1}
+\begin{tabular}{lrrr}
+\toprule
+Class & Total & Train & Test\\
+\midrule
+Normal              & 284 & 227 & 57\\
+Arrhythmia          & 233 & 186 & 47\\
+Myocardial Infarction & 239 & 191 & 48\\
+History of MI       & 172 & 138 & 34\\
+\midrule
+\textbf{Total}      & \textbf{928} & \textbf{742} & \textbf{186}\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All models were evaluated on the same held-out 186-image test set. The
+TruncatedSVD reducer and the MinMaxScaler were fitted on the 742
+training samples and serialised; the test set passed through the same
+fitted objects without refitting, preventing the leakage failure mode
+identified in~\cite{vasquez2024}. The primary metrics are accuracy and
+macro-averaged F1, with per-class and macro-averaged ROC-AUC also
+reported. McNemar's test~\cite{mcnemar1947} is applied to all pairwise
+model comparisons. Expected Calibration Error (ECE) is computed with
+15 equal-width probability bins.
+
+Because the test set contains 186 images, a single reclassified sample
+shifts accuracy by 0.54 percentage points. Differences of this
+magnitude are reported for completeness but are not interpreted as
+evidence of a real performance gap. The ablation effects discussed in
+Section~\ref{sec:ablation} range from 4 to 26 percentage points,
+corresponding to 8 to 49 samples.
+
+All experiments ran on a standard CPU (Intel Core~i7, 16~GB RAM).
+Quantum circuits were simulated with the Qiskit Aer~0.13 statevector
+simulator~\cite{qiskit2023}. The software stack uses Python~3.10,
+TensorFlow~2.15, Scikit-learn~1.3~\cite{sklearn} and Qiskit Machine
+Learning~0.7. Random Forest and k-Nearest Neighbour classifiers were
+also trained on the same nine-dimensional MinMax-scaled features and
+are included in Table~\ref{tab:perf} as additional classical reference
+points.
+
+Kernel Target Alignment (KTA)~\cite{kta2001} was computed for every
+distinct kernel in the ablation sweep. Because KTA is a property of the
+kernel matrix and the labels alone, it does not vary with the SVM
+regularisation constant, so the 320-configuration sweep contains
+64~distinct kernels across four encoding ranges, four entanglement
+topologies and four repetition counts. KTA values span 0.1063 to
+0.1277. The highest value, 0.1277, is attained by $[0,1]$ encoding with
+full entanglement at $\texttt{reps}\!=\!1$, which is not the
+highest-accuracy configuration. The selected circuit, $[0,\pi]$ with
+circular entanglement at $\texttt{reps}\!=\!2$, has KTA\,=\,0.1131,
+mid-range and 0.0146 below the maximum. The two highest-KTA
+configurations, both raw $[0,1]$ with full entanglement at
+$\texttt{reps}\!=\!1$, produce 89.78\% and 92.47\% respectively, well
+below the 94.62\% of the selected circuit. Across the sweep the KTA
+ranking and the accuracy ranking disagree on both the best encoding
+range and the best topology, so higher alignment does not imply higher
+accuracy in this setting. That is a useful negative result for
+practitioners, since KTA is frequently proposed as a cheap
+circuit-selection criterion that avoids training a classifier per
+configuration. It is reported here as a descriptive statistic for the
+selected circuit rather than as a selection rule.
+
+%-----------------------------------------------------------------------
+\section{Results and Discussion}
+%-----------------------------------------------------------------------
+
+\subsection{Model Performance}
+
+Table~\ref{tab:perf} reports accuracy, precision, recall and macro F1
+for all five classifiers on the held-out 186-image test set.
+
+\begin{table}[t]
+\caption{Model Performance on the 186-Image Test Set}
+\label{tab:perf}
+\centering
+\renewcommand{\arraystretch}{1.1}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccccr}
+\toprule
+Model & Acc. & Prec. & Recall & F1 & \cite{prabhu2023}\\
+\midrule
+Classical SVM & 84.95\% & 84.17\% & 84.41\% & 84.10\% & 83.33\%\\
+\textbf{QSVC (ours)} & \textbf{94.62\%} & \textbf{94.84\%} & \textbf{94.05\%} & \textbf{94.39\%} & 94.09\%\\
+Pegasos QSVC & 91.94\% & 91.99\% & 91.61\% & 91.31\% & 93.05\%\\
+Random Forest & 91.94\% & 91.39\% & 91.80\% & 91.20\% & N/A\\
+k-NN & 84.95\% & 85.54\% & 85.07\% & 83.61\% & N/A\\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+The tuned QSVC leads the four other classifiers. Its margin over the
+classical SVM is 9.67 percentage points, but the SVM is not the
+strongest classical baseline in the table. Random Forest reaches 91.94\%
+on the same nine-dimensional features with no quantum component, which
+reduces the margin that the quantum kernel actually has to defend to
+2.68 points, or five test images. First, the nine-dimensional SVD
+features already carry strong discriminative signal, so the quantum
+kernel is improving on an informative representation rather than
+compensating for a weak one. Second, any claim of quantum advantage must
+be stated against Random Forest as well as against the SVM, which
+Section~\ref{sec:sig} does.
+
+The classical SVM exceeds the corresponding baseline in~\cite{prabhu2023}
+by 1.62 points, which we tentatively attribute to balanced class
+weighting and to the resampling performed by the calibration wrapper.
+Pegasos falls 1.11 points below the 93.05\% reported
+in~\cite{prabhu2023}; the likely cause is stricter leakage control here.
+The 0.53-point margin over the QSVC figure reported in~\cite{prabhu2023}
+corresponds to a single test image, and no conclusion is drawn from it.
+
+Table~\ref{tab:perclass} gives per-class precision, recall and F1 for
+the three deployed classifiers.
+
+\begin{table}[t]
+\caption{Per-Class Precision / Recall / F1 (186-Image Test Set)}
+\label{tab:perclass}
+\centering
+\renewcommand{\arraystretch}{1.1}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccc}
+\toprule
+Class & SVM P/R/F1 & QSVC P/R/F1 & Pegasos P/R/F1 & $n$\\
+\midrule
+Normal    & 0.870/0.825/0.847 & \textbf{0.948/0.965/0.957} & 0.891/\textbf{1.000}/0.942 & 57\\
+Arrhythmia & 0.881/0.787/0.832 & \textbf{0.878/0.915/0.896} & 0.944/0.723/0.819 & 47\\
+MI        & 0.873/\textbf{1.000}/0.932 & \textbf{1.000/1.000/1.000} & 0.980/\textbf{1.000}/0.990 & 48\\
+Hist.\ MI & 0.743/0.765/0.754 & \textbf{0.968/0.882/0.923} & 0.865/0.941/0.901 & 34\\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+The QSVC achieves 100\% recall on Myocardial Infarction (48 of 48), the
+class for which a missed detection carries the greatest clinical cost;
+all three classifiers reach 100\% recall on this class. The QSVC leads
+on every class except Normal recall, where Pegasos achieves perfect
+recall at the cost of some precision. Arrhythmia is the most frequently
+confused class across all models, consistent with the morphological
+variability of rhythm abnormalities. History of MI shows the largest
+gap between the QSVC (F1\,=\,0.923) and the classical SVM
+(F1\,=\,0.754), indicating that the quantum kernel's advantage is
+concentrated on the two most ambiguous classes.
+
+\subsection{Statistical Significance}
+\label{sec:sig}
+
+Table~\ref{tab:mcnemar} reports McNemar's test for all pairwise model
+comparisons.
+
+\begin{table}[t]
+\caption{McNemar's Test Results ($n=186$ Test Samples)}
+\label{tab:mcnemar}
+\centering
+\renewcommand{\arraystretch}{1.1}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccccl}
+\toprule
+Comparison & $b$ & $c$ & $\chi^2$ & $p$ & Sig.\\
+\midrule
+\textbf{QSVC vs.\ SVM} & \textbf{23} & \textbf{5} & \textbf{10.321} & \textbf{0.0013} & \textbf{Yes}\\
+Pegasos vs.\ SVM & 19 & 6 & 5.760 & 0.0164 & Yes\\
+QSVC vs.\ Pegasos & 9 & 4 & 1.231 & 0.267 & No\\
+QSVC vs.\ Rand.\ Forest & 11 & 6 & 0.941 & 0.332 & No\\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+The QSVC corrected 23 samples that the classical SVM misclassified
+while missing only~5 that the SVM classified correctly. With continuity
+correction, $\chi^2=(|23-5|-1)^2/(23+5)=10.32$ at $p=0.0013$, which
+indicates that the difference is a systematic property of the two
+models rather than an artefact of the particular split. Both quantum
+models are significantly better than the classical SVM at the 0.05
+threshold.
+
+The remaining rows bound the claim. The QSVC versus Random Forest
+comparison gives $\chi^2=0.941$ at $p=0.332$, well short of
+significance. The quantum kernel is significantly better than a tuned
+RBF SVM on this data, though better than the strongest classical
+baseline by a margin this test set cannot resolve. To the best of our
+knowledge, no prior study of ECG image classification reports a
+significance test of quantum kernel advantage at all.
+
+\subsection{ROC-AUC and Confidence Calibration}
+\label{sec:roc-roc}
+
+Both quantum models reach AUC\,=\,1.000 on Myocardial Infarction,
+ranking every MI sample above every non-MI sample at every threshold.
+The QSVC macro ROC-AUC of 0.989 exceeds the classical SVM's 0.940 by
+0.049 across all four classes. Expected Calibration Error is below 0.07
+for all three models: 0.054 for the SVM, 0.063 for the QSVC and 0.067
+for Pegasos. A model reporting 80\% confidence is therefore correct in
+approximately 80\% of cases, a property required before a system can
+meaningfully support a clinical decision. Calibration analysis of this
+kind was not found in any of the ECG quantum machine learning papers
+surveyed in Section~II.
+
+\subsection{Augmentation Robustness}
+\label{sec:robust}
+
+\begin{figure}[t]
+  \centering
+  \fbox{\parbox{0.9\columnwidth}{\centering\vspace{1.5cm}%
+    [Figure: augmentation robustness bar chart -- to be inserted here]%
+    \vspace{1.5cm}}}
+  \caption{Model accuracy under nine augmentation conditions. The
+    classical SVM falls to 46.7\% under brightness perturbation while
+    the QSVC maintains 86.7\%.}
+  \label{fig:augmentation}
+\end{figure}
+
+The robustness evaluation used a fixed subset of 45~images from a
+second ECG collection, covering Normal and Arrhythmia cases only, held
+constant across every perturbation condition. The subset spans only two
+of the four training classes, and it is small enough that a single
+image moves accuracy by 2.2~points. Unperturbed, both the classical SVM
+and the QSVC classify 38 of 45 (84.4\%). Under brightness perturbation,
+which simulates an overexposed photograph of a paper ECG print, the
+classical SVM falls to 21~of~45 (46.7\%) while the QSVC classifies
+39~of~45 (86.7\%). The 40.0-point gap is far larger than the 2.2-point
+resolution of a single image, which is why the direction of the effect
+is reported; its magnitude is not precisely estimated.
+
+The ZZFeatureMap encodes feature values as phase angles, and phase is
+periodic, so a uniform brightness shift advances the encoded state
+around the Bloch sphere rather than displacing it away from the training
+support vectors. The RBF kernel operates on Euclidean distance in the
+same nine-dimensional compressed space, where the same shift translates
+every test sample away from its nearest training neighbours. Brightness
+is the one perturbation axis where phase encoding produces a measurable
+advantage, and it is also the axis that varies most in practice, since
+ward ECG prints are photographed under whatever light is available.
+
+\subsection{Cross-Dataset Transfer}
+\label{sec:transfer}
+
+The three trained models were applied without retraining to the second
+Mendeley ECG collection used by Jain et al.~\cite{jain2025}, comprising
+707~images across Normal~(295), Abnormal Heartbeat/Arrhythmia~(241) and
+History of MI~(171). The Myocardial Infarction class is absent from
+that collection, so any prediction of it counts as an error.
+
+\begin{table}[t]
+\caption{Zero-Shot Transfer to a Second Scanner Domain
+         (707~Images, Three Classes)}
+\label{tab:transfer}
+\centering
+\renewcommand{\arraystretch}{1.1}
+\begin{tabular}{lccc}
+\toprule
+Model & 3-cls Acc. & 3-cls F1 & Binary Acc.\\
+\midrule
+Classical SVM        & \textbf{62.66\%} & \textbf{0.638} & \textbf{70.72\%}\\
+QSVC (frozen)        & 34.09\% & 0.173 & 58.27\%\\
+Pegasos QSVC (frozen) & 45.40\% & 0.435 & 60.25\%\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The ordering reverses. The frozen ResNet50 was never adapted to either
+scanner, and the second collection differs in contrast, brightness
+distribution and trace density, which relocates the SVD-compressed
+vectors into a region the training support vectors cover poorly. The
+consequence is specific: the 94.62\% figure, the McNemar result and the
+brightness robustness are all properties of the training scanner domain,
+and domain adaptation of the feature extractor, not a change to the
+quantum circuit, is the step that would extend them.
+
+%-----------------------------------------------------------------------
+\section{Ablation Studies}
+\label{sec:ablation}
+%-----------------------------------------------------------------------
+
+\subsection{Feature Encoding Range}
+
+Table~\ref{tab:encoding} compares QSVC and Pegasos accuracy across four
+encoding ranges. All rows use circular entanglement,
+$\texttt{reps}\!=\!2$ and $C\!=\!5.0$.
+
+\begin{table}[t]
+\caption{Accuracy vs.\ Feature Encoding Range\\
+         (all rows: circular entanglement, reps\,=\,2, $C$\,=\,5.0)}
+\label{tab:encoding}
+\centering
+\renewcommand{\arraystretch}{1.1}
+\begin{tabular}{lrr}
+\toprule
+Encoding & QSVC Acc. & Pegasos Acc.\\
+\midrule
+L2 normalisation (unit sphere) & 68.28\% & 57.53\%\\
+MinMax $[0,1]$                 & 92.47\% & 84.41\%\\
+\textbf{MinMax $[0,\pi]$ (ours)} & \textbf{94.62\%} & \textbf{90.86\%}$^{\dagger}$\\
+MinMax $[0,2\pi]$              & 94.09\% & 90.32\%\\
+\bottomrule
+\end{tabular}
+\smallskip
+
+\begin{flushleft}
+{\footnotesize $^{\dagger}$Pegasos at shared $C\!=\!5.0$. The final
+tuned result (91.94\%, Table~\ref{tab:perf}) uses per-model
+regularisation and iteration tuning.}
+\end{flushleft}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \fbox{\parbox{0.9\columnwidth}{\centering\vspace{1.5cm}%
+    [Figure: QSVC accuracy vs.\ encoding range bar chart -- to be
+    inserted here]%
+    \vspace{1.5cm}}}
+  \caption{QSVC accuracy across four feature encoding ranges, all with
+    circular entanglement. L2 normalisation discards feature magnitude
+    and produces the largest drop. Moving to $[0,2\pi]$ introduces
+    phase wrap-around.}
+  \label{fig:encoding}
+\end{figure}
+
+After the Hadamard layer the qubit states lie on the equator of the
+Bloch sphere, and the $R_z$ gates advance the azimuthal phase angle. A
+feature confined to $[0,1]$ sweeps approximately~2~radians of the
+$2\pi$ available, so the encoded states remain clustered within a narrow
+arc. Extending the range to $[0,\pi]$ opens the sweep to the full
+circle, distributing the encoded states more widely. This moves away
+from the kernel concentration regime analysed by Thanasilp
+et al.~\cite{thanasilp2024}, in which kernel values collapse towards a
+fixed point and the trained model becomes insensitive to its input.
+Moving from $[0,1]$ to $[0,\pi]$ raises the effective rank of the
+kernel matrix by~38\% (from 94.6 to 130.4) and accuracy by 2.15
+percentage points under circular entanglement. L2 normalisation performs
+worst by a wide margin (26.34~points below $[0,\pi]$), because
+projecting onto the unit sphere discards feature magnitude entirely, and
+magnitude is what the dominant uncentred SVD components encode.
+
+To check whether a range marginally below~$\pi$ would avoid the
+endpoint-collision concern and equal or exceed~$\pi$, a fine sweep at
+six sub-$\pi$ values was run under circular entanglement
+($\texttt{reps}\!=\!2$, $C\!=\!5.0$).
+
+\begin{table}[t]
+\caption{Encoding Range Fine Sweep\\
+         (circular entanglement, reps\,=\,2, $C$\,=\,5.0)}
+\label{tab:finesweep}
+\centering
+\renewcommand{\arraystretch}{1.1}
+\begin{tabular}{lrr}
+\toprule
+Range & Accuracy & Correct\,/\,186\\
+\midrule
+$[0,\,0.80\pi]$ & 92.47\% & 172\\
+$[0,\,0.85\pi]$ & 93.55\% & 174\\
+$[0,\,0.90\pi]$ & 92.47\% & 172\\
+$[0,\,0.95\pi]$ & 91.40\% & 170\\
+$\mathbf{[0,\,\pi]}$ & \textbf{94.62\%} & \textbf{176}\\
+$[0,\,1.05\pi]$ & 94.09\% & 175\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+No sub-$\pi$ value exceeds $[0,\pi]$. The best of them, $0.85\pi$ at
+174 of~186, is two test images below~$\pi$, and $1.05\pi$ is one image
+below. The endpoint collision therefore does not cost measurable
+accuracy on this dataset.
+
+The quantity that tracks accuracy here is the effective rank rather than
+the dispersion of kernel values. Moving from $[0,1]$ to $[0,\pi]$
+raises the effective rank by~38\% alongside the 2.15-point accuracy
+gain, so a larger fraction of the 512-dimensional space is used to
+separate the samples. The dispersion moves the other way: the standard
+deviation of off-diagonal kernel values falls by~30\%, and the mean
+sits closer to the $1/2^9\!=\!0.00195$ random-overlap floor. The
+widened encoding range does not spread the kernel values out; it
+redistributes them into more independent directions.
+
+\subsection{Entanglement Topology}
+
+Table~\ref{tab:topology} compares QSVC accuracy across five entanglement
+topologies. All rows use $[0,\pi]$ encoding, $\texttt{reps}\!=\!2$ and
+$C\!=\!5.0$.
+
+\begin{table}[t]
+\caption{Accuracy vs.\ Entanglement Topology\\
+          ($[0,\pi]$ encoding, reps\,=\,2, $C$\,=\,5.0)}
+\label{tab:topology}
+\centering
+\renewcommand{\arraystretch}{1.1}
+\begin{tabular}{lrl}
+\toprule
+Topology & QSVC Acc. & Gain vs.\ Linear\\
+\midrule
+Linear                        & 93.01\% & N/A\\
+Pairwise                      & 93.01\% & 0.00~pp\\
+Full                          & 92.47\% & $-$0.54~pp\\
+\textbf{Circular (ours)}      & \textbf{94.62\%} & $+$1.61~pp\\
+Shifted-circular-alt.\ (SCA)  & 94.62\% & $+$1.61~pp\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The circular topology closes the qubit chain by connecting qubit~8 back
+to qubit~0, adding exactly one entangling pair at negligible additional
+depth. It is the only topology that stands clearly apart. Full
+entanglement does not improve on linear or pairwise at $[0,\pi]$
+encoding, plausibly because the much larger number of entangling gates
+over-parameterises the kernel for a nine-dimensional input.
+
+\subsection{Separating the Two Factors}
+
+Table~\ref{tab:factorial} gives the four cells of the complete
+$2\!\times\!2$ factorial design ($\texttt{reps}\!=\!2$, $C\!=\!5.0$).
+
+\begin{table}[t]
+\caption{QSVC Accuracy by Encoding Range and Topology\\
+         (reps\,=\,2, $C$\,=\,5.0)}
+\label{tab:factorial}
+\centering
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lcc}
+\toprule
+ & Linear & Circular\\
+\midrule
+$[0,1]$ & 89.78\% (167/186) & 92.47\% (172/186)\\
+$[0,\pi]$ & 93.01\% (173/186) & \textbf{94.62\% (176/186)}\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The four simple effects follow directly. Changing the topology from
+linear to circular is worth 2.69~points under $[0,1]$ encoding and
+1.61~points under $[0,\pi]$. Changing the encoding range from $[0,1]$
+to $[0,\pi]$ is worth 3.23~points under linear entanglement and
+2.15~points under circular. The two effects are sub-additive: moving
+from $[0,1]$+linear to $[0,\pi]$+circular gains 4.84~points, which is
+1.08~points less than the sum of the two individual gains (5.92). A
+five-seed cross-validation confirmed that the cell ordering holds across
+all seeds and that the sub-additivity replicates at the mean (5.81 joint
+against 6.46 summed). Seed~42 lies 1.1 to 2.1 standard deviations above
+the five-seed mean in every cell, so the absolute accuracies quoted
+throughout this paper should be read as the upper end of the attainable
+range rather than as expected values.
+
+Kernel Target Alignment (KTA)~\cite{kta2001} was computed for all
+64~distinct kernels in the ablation sweep. KTA values span 0.1063
+to~0.1277; the highest-KTA configurations are not the
+highest-accuracy ones. KTA therefore does not serve as a reliable
+circuit-selection criterion in this setting, which is a useful negative
+result for practitioners since KTA is frequently proposed as a cheap
+circuit-selection heuristic.
+
+\subsection{Pauli Feature Map Comparison}
+
+The ZZFeatureMap outperforms all three alternative Pauli maps under
+identical conditions (nine qubits, $\texttt{reps}\!=\!2$, $[0,\pi]$
+encoding, $C\!=\!5.0$, circular entanglement). The ZFeatureMap, which
+applies only single-qubit $R_z$ rotations with no entanglement, drops
+to 87.63\%, 6.99~percentage points below the ZZFeatureMap, confirming
+the direct contribution of the ZZ entangling interactions. The
+$\mathrm{X}$+$\mathrm{XX}$ variant reaches 91.94\% and the
+$\mathrm{Y}$+$\mathrm{YY}$ variant falls to 83.33\%, below the
+classical SVM baseline.
+
+\subsection{Retained Components and Circuit Repetitions}
+\label{sec:svd-reps}
+
+Sweeping the retained components from 2 to 18 shows accuracy peaking at
+nine, confirming the choice made in~\cite{prabhu2023}. Below nine,
+discriminative structure from the ResNet50 activation map is discarded;
+above nine, additional components contribute more noise than signal
+relative to the encoding capacity. Sweeping circuit repetitions
+confirms $\texttt{reps}\!=\!2$: $\texttt{reps}\!=\!3$ and
+$\texttt{reps}\!=\!4$ give no accuracy gain while adding statevector
+computation cost, consistent with the finding of Ozpolat and
+Karabatak~\cite{ozpolat2023} that increasing circuit depth beyond a
+sufficient encoding level does not improve quantum SVM performance.
+
+%-----------------------------------------------------------------------
+\section{Limitations}
+%-----------------------------------------------------------------------
+
+\textbf{Single split, no variance estimate.} All results come from one
+stratified split at $\texttt{random\_state}\!=\!42$. A five-seed
+cross-validation is presented in Section~\ref{sec:ablation} but does
+not replace a full bootstrap; repeating the full 320-configuration sweep
+across ten or more seeds is the first item of further work.
+
+\textbf{Pipeline-relative accuracies.} Re-running $[0,1]$+full
+entanglement, the Prabhu et al.~\cite{prabhu2023} configuration as
+inferred from the Qiskit default, gives 93.01\% against the 94.09\%
+reported there, a residual gap of 1.08~points well within what split
+and seed variation can explain. All ablation gains are measured against
+configurations run on this pipeline, keeping circuit design comparisons
+internally consistent.
+
+\textbf{Domain-bounded advantage.} The zero-shot transfer in
+Section~\ref{sec:transfer} reverses the model ordering, so every
+accuracy, significance and robustness result is a within-domain result
+for the training scanner.
+
+\textbf{Margin against the strongest baseline.} The significance result
+is established against a tuned RBF SVM. Against Random Forest, the
+margin is 2.68~points and is not resolvable at $n\!=\!186$.
+
+\textbf{Ideal simulation.} All quantum results come from noiseless
+statevector simulation, so the reported accuracies are an upper bound on
+what a NISQ device would deliver at nine qubits.
+
+\textbf{Inherited extraction layer.} The \texttt{pool1\_pool} layer was
+adopted from~\cite{prabhu2023} rather than selected empirically, and no
+layer-wise ablation against deeper ResNet50 outputs was run.
+
+%-----------------------------------------------------------------------
+\section{Conclusion}
+%-----------------------------------------------------------------------
+
+This work treats the quantum feature map as a design space to be
+measured rather than a component to be adopted. A controlled
+$2\!\times\!2$ factorial ablation over encoding range and entanglement
+topology shows that scaling features to $[0,\pi]$ and closing the qubit
+chain into a ring each raise accuracy at both levels of the other
+factor, and that their joint gain of 4.84~percentage points falls
+1.08~points short of the sum of the separate gains. The best of the
+four cells, $[0,\pi]$ with circular entanglement at
+$\texttt{reps}\!=\!2$, classifies 94.62\% of a held-out 186-image test
+set, and McNemar's test places that result significantly above a tuned
+classical RBF SVM ($\chi^2\!=\!10.32$, $p\!=\!0.0013$). Expected
+Calibration Error below 0.07 for all three deployed models and a
+nine-condition perturbation study in which phase encoding retains 86.7\%
+under brightness distortion where the classical SVM reaches 46.7\%
+accompany it.
+
+Against Random Forest the margin is 2.68~points and does not reach
+significance at this test-set size ($b\!=\!11$, $c\!=\!6$,
+$\chi^2\!=\!0.941$, $p\!=\!0.332$). Under zero-shot transfer to a
+second scanner domain the ordering reverses entirely. These results
+locate the contribution precisely: the circuit design choices measured
+here are the right ones for this pipeline and this domain, and the
+obstacle to generalisation lies in the classical feature extractor
+rather than in the quantum circuit. Three items of work address this
+directly: domain-adaptive fine-tuning of the ResNet50 extractor,
+noise-model evaluation at nine qubits, and gradient-based saliency
+overlays that would show clinicians which region of a trace drove a
+decision.
+
+%-----------------------------------------------------------------------
+\section*{Code and Data Availability}
+%-----------------------------------------------------------------------
+
+The ECG image dataset is publicly available on Mendeley
+Data~\cite{khan2021}. The implementation, trained model artefacts and
+the scripts reproducing all tables and figures are available at
+\url{https://github.com/karthikspoojary/QuCardio}.
+
+%-----------------------------------------------------------------------
+\section*{Acknowledgement}
+%-----------------------------------------------------------------------
+
+The authors thank the Qiskit open-source community and IBM Quantum for
+the quantum computing framework. The ECG dataset was made publicly
+available by Khan et al.\ through Mendeley Data, collected at the
+Ch.\ Pervaiz Elahi Institute of Cardiology, Multan. The authors
+acknowledge the support of the Department of Computer Science and
+Engineering, St.\ Joseph Engineering College, Mangaluru.
+
+%-----------------------------------------------------------------------
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}

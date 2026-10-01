@@ -1,0 +1,155 @@
+\documentclass[12pt,a4paper]{report}
+\usepackage[utf8]{inputenc}
+\usepackage{amsfonts}
+\usepackage{amsmath,amssymb}
+\usepackage{setspace}
+\usepackage{graphicx}
+\usepackage{array}
+\usepackage{fancyhdr}
+\usepackage{geometry}
+\usepackage{ragged2e}
+\usepackage{color}
+\usepackage{pdfpages}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{longtable}
+\usepackage{url}
+\usepackage{cite}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\geometry{
+a4paper,
+total={210mm,297mm},
+left=1.15in,
+right=0.85in,
+top=1.0in,
+bottom=1.0in,
+}
+
+\begin{document}
+\pagestyle{empty}
+\begin{center}
+
+{\large \textbf{Visvesvaraya Technological University, Belagavi -- 590018}}
+\begin{figure}[hbtp]
+\centering
+\includegraphics[width=2.3cm,height=2.8cm]{./pic/vtu}
+\end{figure}
+
+\textbf{PROJECT REPORT}
+\par
+\textbf{ON}
+\par
+\vspace{8pt}
+{\Large\textbf{APPLICATION OF QUANTUM MACHINE LEARNING FOR\\[0.3em]
+DETECTION OF CARDIOVASCULAR DISEASES}}
+\par
+\vspace{10pt}
+\par
+\textit{\textbf{Submitted in partial fulfillment for the award of degree of}}
+\par
+\vspace{12pt}
+\large \textbf{BACHELOR OF ENGINEERING}
+\par
+\textbf{in}
+\par
+\large \textbf{COMPUTER SCIENCE \& ENGINEERING}
+\par
+\vspace{12pt}
+\textit{\textbf{Submitted by}}
+\vspace{8pt}
+
+\textbf{\large (Team Member 1 Name)}\qquad \qquad \qquad \qquad \textbf{\large (USN 1)}\\ \vspace{3pt}
+\textbf{\large (Team Member 2 Name)}\qquad \qquad \qquad \qquad \textbf{\large (USN 2)}\\ \vspace{3pt}
+\textbf{\large (Team Member 3 Name)}\qquad \qquad \qquad \qquad \textbf{\large (USN 3)}\\ \vspace{3pt}
+\textbf{\large (Team Member 4 Name)}\qquad \qquad \qquad \qquad \textbf{\large (USN 4)}\\ \vspace{3pt}
+
+\vspace{12pt}
+\textit{\textbf{Under the Guidance of}}
+\par
+\vspace{6pt}
+\textbf{(Guide Name)}
+\par
+\vspace{2pt}
+\normalsize{(Designation), Department of CSE}
+\par
+\begin{figure}[hbtp]
+\centering
+\includegraphics[scale=0.5]{./pic/sjeclogo}
+\end{figure}
+\large \textbf{DEPT. OF COMPUTER SCIENCE AND ENGINEERING}
+\par \Large \textbf{ST JOSEPH ENGINEERING COLLEGE}
+\par
+\textbf{An Autonomous Institution}
+\par
+{\large{(Affiliated to VTU Belagavi, Recognized by AICTE)}
+\par
+\vspace{3pt}
+{\large \textbf{Vamanjoor, Mangaluru - 575028, Karnataka}}
+\par
+\vspace{12pt}
+{\large \textbf{2025-26}}
+\end{center}
+\newpage
+
+% Certificate Page
+\begin{center}
+\LARGE \textbf{ST JOSEPH ENGINEERING COLLEGE}
+\par
+\Large \textbf{An Autonomous Institution}
+\par \large{(Affiliated to VTU Belagavi, Recognized by AICTE)}
+\par \vspace{3pt}
+\large \textbf{Vamanjoor, Mangaluru - 575028, Karnataka}
+\par \vspace{12pt}
+\par
+\large \textbf{DEPT. OF COMPUTER SCIENCE AND ENGINEERING}
+\par
+\begin{figure}[hbtp]
+\centering
+\includegraphics[scale=0.5]{./pic/sjeclogo}
+\end{figure}
+{\Large \textbf{CERTIFICATE}}
+\end{center}
+\justifying
+\par
+\setstretch{1.2}
+\noindent
+Certified that the project work entitled \textbf{``Application of Quantum Machine Learning for Detection of Cardiovascular Diseases''} carried out by\vspace{0.25in}
+\par
+
+\noindent
+\vspace{2pt}
+\textbf{\large \quad \quad \qquad (Team Member 1 Name)}\qquad \qquad \qquad \qquad \textbf{\large (USN 1)}\\ \vspace{2pt}
+\textbf{\large \quad \quad \qquad (Team Member 2 Name)}\qquad \qquad \qquad \qquad \textbf{\large (USN 2)}\\ \vspace{2pt}
+\textbf{\large \quad \quad \qquad (Team Member 3 Name)}\qquad \qquad \qquad \qquad \textbf{\large (USN 3)}\\ \vspace{2pt}
+\textbf{\large \quad \quad \qquad (Team Member 4 Name)}\qquad \qquad \qquad \qquad \textbf{\large (USN 4)}\\ \vspace{1pt}
+\justifying
+
+\noindent
+the bonafide students of VII semester Computer Science \& Engineering in partial fulfillment for the award of Bachelor of Engineering in Computer Science and Engineering of the Visvesvaraya Technological University, Belagavi during the year 2025-26. It is certified that all corrections/suggestions indicated during Internal Assessment have been incorporated in the report. The project report has been approved as it satisfies the academic requirements in respect of project work prescribed for the said degree.
+
+\par
+\vspace{0.33in}
+\setstretch{1.15}
+\begin{tabbing}
+---------------------------------\hspace{0.3in}\=----------------------------------- \hspace{0.3in}\=--------------------------------- \\
+\textbf{(Guide Name)}\>\hspace{0.3in}\textbf{Dr Melwyn D'Souza}\>\hspace{0.3in}\textbf{Dr Rio D'Souza}\\
+\hspace{0.5in}Project Guide\>\hspace{0.50in} HOD-CSE \>\hspace{0.6in}Principal
+\end{tabbing}
+
+\begin{center}
+\large \textbf{External Viva}:
+\end{center}
+\begin{flushleft}
+\begin{normalsize}Examiner's Name \end{normalsize}
+\hspace{6.5cm}
+\begin{normalsize}Signature with Date\end{normalsize}
+\end{flushleft}
+\vspace{0.1in}
+\begin{flushleft}
+1. \ldots\ldots\ldots\ldots\ldots\ldots \ldots \hspace{5.8cm}\ldots\ldots\ldots\ldots \ldots\ldots\ldots
+\par
+\vspace{0.2in}
+2. \ldots\ldots\ldots\ldots\ldots\ldots \ldots \hspace{5.8cm}\ldots\ldots\ldots\ldots \ldots\ldots\ldots
+\end{flushleft}
+\newpage
